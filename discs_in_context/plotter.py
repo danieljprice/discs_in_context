@@ -153,6 +153,84 @@ class plotcloud:
             l, b = np.meshgrid(l, b)
             self.coords = SkyCoord(l * units.deg,b * units.deg,frame='galactic')
 
+    def _apply_scaling(self, ax, scale_factor, default_fontsize):
+        """
+        Apply scaling to all plot elements for interactive display.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes to scale.
+        scale_factor : float
+            Scaling factor (typically 0.2 for interactive plots).
+        default_fontsize : float
+            Default font size to scale from.
+
+        Returns
+        -------
+        scaled_fontsize : float
+            Scaled font size.
+        labelpad : float
+            Scaled label padding.
+        """
+        scaled_fontsize = default_fontsize * scale_factor
+        tick_pad = 2 * scale_factor
+        title_pad = 4 * scale_factor
+        labelpad = 3 * scale_factor
+
+        # Scale fonts
+        ax.tick_params(labelsize=scaled_fontsize, width=scale_factor,
+                      length=4 * scale_factor, pad=tick_pad)
+        ax.xaxis.label.set_fontsize(scaled_fontsize)
+        ax.yaxis.label.set_fontsize(scaled_fontsize)
+        ax.title.set_fontsize(scaled_fontsize)
+
+        # Scale line widths
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.5 * scale_factor)
+
+        # Scale grid line widths (if grid exists)
+        for line in ax.xaxis.get_gridlines():
+            line.set_linewidth(0.3 * scale_factor)
+        for line in ax.yaxis.get_gridlines():
+            line.set_linewidth(0.3 * scale_factor)
+
+        # Store for later use
+        self._title_pad = title_pad
+        self._scaled_fontsize = scaled_fontsize
+        self._interactive_scale = scale_factor
+
+        return scaled_fontsize, labelpad
+
+    def _restore_scaling(self, ax, default_fontsize):
+        """
+        Restore original (non-scaled) sizes for saving.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes to restore.
+        default_fontsize : float
+            Default font size to restore to.
+        """
+        ax.tick_params(labelsize=default_fontsize, width=1.0, length=4.0, pad=2.0)
+        ax.xaxis.label.set_fontsize(default_fontsize)
+        ax.yaxis.label.set_fontsize(default_fontsize)
+        ax.title.set_fontsize(default_fontsize)
+
+        # Restore line widths
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.5)
+        for line in ax.xaxis.get_gridlines():
+            line.set_linewidth(0.3)
+        for line in ax.yaxis.get_gridlines():
+            line.set_linewidth(0.3)
+
+        # Restore padding
+        ax.set_xlabel(ax.get_xlabel(), labelpad=3)
+        ax.set_ylabel(ax.get_ylabel(), labelpad=3)
+        ax.set_title(ax.get_title(), pad=4.0, fontsize=default_fontsize)
+
     def _setup_interactive_labels(self, ax, scatter_points, labels_data, scale_factor=1.0):
         """
         Set up interactive label display on hover/click for scatter points.
@@ -473,26 +551,13 @@ class plotcloud:
         ax = fig.add_subplot(1, 1, 1)
 
         # Scale font sizes, line widths, and other elements for interactive display
+        import matplotlib as mpl
+        default_fontsize = mpl.rcParams['font.size']
         if interactive:
-            # Get current default font sizes and scale them
-            import matplotlib as mpl
-            default_fontsize = mpl.rcParams['font.size']
-            scaled_fontsize = default_fontsize * scale_factor
-            # Scale tick label padding and title padding
-            tick_pad = 2 * scale_factor
-            title_pad = 4 * scale_factor
-            ax.tick_params(labelsize=scaled_fontsize, width=scale_factor, length=4 * scale_factor, pad=tick_pad)
-            ax.xaxis.label.set_fontsize(scaled_fontsize)
-            ax.yaxis.label.set_fontsize(scaled_fontsize)
-            ax.title.set_fontsize(scaled_fontsize)
-            # Store for later use
-            self._title_pad = title_pad
-            self._scaled_fontsize = scaled_fontsize
-            # Scale axis spines (border lines)
-            for spine in ax.spines.values():
-                spine.set_linewidth(0.5 * scale_factor)
-            # Store scale factor for later use in grid lines and annotations
-            self._interactive_scale = scale_factor
+            scaled_fontsize, labelpad = self._apply_scaling(ax, scale_factor, default_fontsize)
+        else:
+            scaled_fontsize = default_fontsize
+            labelpad = 3
 
         # Set colormap
         if cmap is None:
@@ -517,8 +582,7 @@ class plotcloud:
             )
             ax.set_xlim(self.ra_max * 15.0, self.ra_min * 15.0)
             ax.set_ylim(self.dec_min, self.dec_max)
-            # Scale label offsets (labelpad) for interactive plots
-            labelpad = 3 * scale_factor if interactive else 3
+            # Label offsets are handled in _apply_scaling, use the returned value
             ax.set_xlabel('RA (J2000)', labelpad=labelpad)
             ax.set_ylabel('Dec (J2000)', labelpad=labelpad)
 
@@ -529,9 +593,9 @@ class plotcloud:
                 )
             )
             ax.xaxis.set_major_formatter(formatter)
-            grid_linewidth = 0.3 * (getattr(self, '_interactive_scale', 1.0))
-            plt.grid(axis='x', color='0.3', linestyle='dashed', alpha=0.3, linewidth=grid_linewidth)
-            plt.grid(axis='y', color='0.3', linestyle='dashed', alpha=0.3, linewidth=grid_linewidth)
+            # Grid linewidth will be scaled in _apply_scaling if interactive
+            plt.grid(axis='x', color='0.3', linestyle='dashed', alpha=0.3, linewidth=0.3)
+            plt.grid(axis='y', color='0.3', linestyle='dashed', alpha=0.3, linewidth=0.3)
         else:  # galactic
             ax.imshow(
                 np.sqrt(av)[::, ::-1],
@@ -550,8 +614,7 @@ class plotcloud:
             )
             ax.set_xlim(self.l_min, self.l_max)
             ax.set_ylim(self.b_min, self.b_max)
-            # Scale label offsets (labelpad) for interactive plots
-            labelpad = 3 * scale_factor if interactive else 3
+            # Label offsets are handled in _apply_scaling, use the returned value
             ax.set_xlabel('Galactic longitude', labelpad=labelpad)
             ax.set_ylabel('Galactic latitude', labelpad=labelpad)
             ax.set_aspect('equal')
@@ -628,18 +691,11 @@ class plotcloud:
             # Restore display size and scaled fonts/line widths if interactive
             if interactive:
                 fig.set_size_inches(display_figsize)
-                # Restore scaled font sizes and line widths
-                scaled_fontsize = default_fontsize * scale_factor
-                tick_pad = 2 * scale_factor
-                title_pad = 4 * scale_factor
-                ax.tick_params(labelsize=scaled_fontsize, width=scale_factor, length=4 * scale_factor, pad=tick_pad)
-                ax.xaxis.label.set_fontsize(scaled_fontsize)
-                ax.yaxis.label.set_fontsize(scaled_fontsize)
-                ax.title.set_fontsize(scaled_fontsize)
-                # Restore scaled label offsets and title padding
-                labelpad = 3 * scale_factor
+                # Re-apply scaling for interactive display
+                scaled_fontsize, labelpad = self._apply_scaling(ax, scale_factor, default_fontsize)
                 ax.set_xlabel(ax.get_xlabel(), labelpad=labelpad)
                 ax.set_ylabel(ax.get_ylabel(), labelpad=labelpad)
+                title_pad = getattr(self, '_title_pad', 4.0)
                 ax.set_title(ax.get_title(), pad=title_pad, fontsize=scaled_fontsize)
                 # Restore grid line widths
                 grid_linewidth = 0.3 * scale_factor
@@ -647,9 +703,6 @@ class plotcloud:
                     line.set_linewidth(grid_linewidth)
                 for line in ax.yaxis.get_gridlines():
                     line.set_linewidth(grid_linewidth)
-                # Restore axis spine line widths
-                for spine in ax.spines.values():
-                    spine.set_linewidth(0.5 * scale_factor)
                 # Restore tight layout for interactive
                 fig.tight_layout(pad=0.3, rect=[0, 0, 1, 0.98])
 
