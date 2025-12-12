@@ -138,8 +138,8 @@ class plotcloud:
         if self.coord_system == 'icrs':
             ra_step = self.max_span / self.num_points
             dec_step = self.max_span / (self.num_points * 15)
-            ra = np.linspace(self.ra_min, self.ra_max, self.num_points)
-            dec = np.linspace(self.dec_min, self.dec_max, self.num_points)
+            ra = np.linspace(self.ra_min,self.ra_max,self.num_points)
+            dec = np.linspace(self.dec_min,self.dec_max,self.num_points)
             ra, dec = np.meshgrid(ra, dec)
             self.coords = SkyCoord(
                 ra * units.hourangle,
@@ -148,22 +148,10 @@ class plotcloud:
                 obstime="J2000"
             )
         else:  # galactic
-            l = np.linspace(
-                self.l_min,
-                self.l_max,
-                self.num_points
-            )
-            b = np.linspace(
-                self.b_min,
-                self.b_max,
-                self.num_points
-            )
+            l = np.linspace(self.l_min,self.l_max,self.num_points)
+            b = np.linspace(self.b_min,self.b_max,self.num_points)
             l, b = np.meshgrid(l, b)
-            self.coords = SkyCoord(
-                l * units.deg,
-                b * units.deg,
-                frame='galactic'
-            )
+            self.coords = SkyCoord(l * units.deg,b * units.deg,frame='galactic')
 
     def plot_all_discs(self, ax, csvfile=None):
         """
@@ -185,10 +173,18 @@ class plotcloud:
         nd = df.shape[0]
         print(f"got {nd} discs")
 
+        # Get plot limits
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x_min, x_max = min(xlim), max(xlim)
+        y_min, y_max = min(ylim), max(ylim)
+
         for i in range(nd):
             label, l, b = df.loc[i, :]
-            ax.scatter(l, b, marker='*', s=5, color='cyan')
-            ax.text(l - 0.02, b, label, color='cyan', va='top', ha='right')
+            # Only plot if within plot limits
+            if x_min <= l <= x_max and y_min <= b <= y_max:
+                ax.scatter(l, b, marker='*', s=5, color='cyan')
+                ax.text(l - 0.02, b, label, color='cyan', va='top', ha='right')
 
     def plot_kenyon08_pms(self, ax, csvfile=None, plot_label_filter=None):
         """
@@ -232,6 +228,12 @@ class plotcloud:
                            label.startswith("Anon") or
                            label.startswith("KPNO"))
 
+        # Get plot limits
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x_min, x_max = min(xlim), max(xlim)
+        y_min, y_max = min(ylim), max(ylim)
+
         for i in range(nd):
             label, ra_str, dec_str = df.loc[i, :]
             co1 = SkyCoord(
@@ -243,36 +245,44 @@ class plotcloud:
 
             if self.coord_system == 'icrs':
                 ra1, dec1 = (co1.ra.degree[0], co1.dec.degree[0])
-                plot_label = plot_label_filter(label)
+                # RA is already in degrees, x-axis is also in degrees
+                # Account for potentially reversed xlim
+                ra1_deg = ra1
+                in_x_range = (x_min <= ra1_deg <= x_max) if x_min < x_max else (x_max <= ra1_deg <= x_min)
+                # Only plot if within plot limits
+                if in_x_range and y_min <= dec1 <= y_max:
+                    plot_label = plot_label_filter(label)
 
-                if plot_label:
-                    # Check for position overlap
-                    ral = ra1 - 0.05
-                    decl = dec1
-                    angle = 0.0
-                    while (any(abs(ral - ra_prev) <= self.overlap_range_ra and
-                              abs(decl - dec_prev) <= self.overlap_range
-                              for ra_prev, dec_prev in self.prev_positions)):
-                        decl = decl + self.overlap_range
+                    if plot_label:
+                        # Check for position overlap
+                        ral = ra1 - 0.05
+                        decl = dec1
+                        angle = 0.0
+                        while (any(abs(ral - ra_prev) <= self.overlap_range_ra and
+                                  abs(decl - dec_prev) <= self.overlap_range
+                                  for ra_prev, dec_prev in self.prev_positions)):
+                            decl = decl + self.overlap_range
 
-                    ax.text(
-                        ral, decl, label,
-                        color='cyan', va='top', ha='left',
-                        size=10, clip_on=True, rotation=angle
-                    )
-                    self.prev_positions.append((ral, decl))
-                    ax.scatter(ra1, dec1, marker='*', s=10, color='cyan')
-                else:
-                    ax.scatter(ra1, dec1, marker='*', s=10, color='white')
+                        ax.text(
+                            ral, decl, label,
+                            color='cyan', va='top', ha='left',
+                            size=10, clip_on=True, rotation=angle
+                        )
+                        self.prev_positions.append((ral, decl))
+                        ax.scatter(ra1, dec1, marker='*', s=10, color='cyan')
+                    else:
+                        ax.scatter(ra1, dec1, marker='*', s=10, color='white')
             else:  # galactic
                 galactic_coords = co1.galactic
                 l, b = (galactic_coords.l.degree[0], galactic_coords.b.degree[0])
-                ax.scatter(l, b, marker='*', s=3, color='white')
+                # Only plot if within plot limits
+                if x_min <= l <= x_max and y_min <= b <= y_max:
+                    ax.scatter(l, b, marker='*', s=3, color='white')
 
-    def plot(self, dustmap='planck', figsize=(18, 10), dpi=300,
+    def plot(self, dustmap='planck', figsize=(20, 10), dpi=300,
              vmin=0.0, vmax=2.0, cmap=None, plot_discs=False,
              plot_pms=True, pms_csvfile=None, discs_csvfile=None,
-             pms_label_filter=None, save_path=None, show=False):
+             pms_label_filter=None, save_path=None, interactive=False):
         """
         Create the extinction map plot.
 
@@ -289,7 +299,7 @@ class plotcloud:
         vmax : float, default 2.0
             Maximum value for colormap.
         cmap : str, optional
-            Colormap name. If None, uses 'binary'
+            Colormap name. If None, uses 'binary'.
         plot_discs : bool, default False
             Whether to plot all discs.
         plot_pms : bool, default True
@@ -301,9 +311,10 @@ class plotcloud:
         pms_label_filter : callable, optional
             Filter function for PMS labels.
         save_path : str, optional
-            Path to save figure. If None, doesn't save.
-        show : bool, default False
-            Whether to display the figure.
+            Path to save figure. If None and interactive=False, doesn't save.
+        interactive : bool, default False
+            If True, display the figure interactively. If False and
+            save_path is provided, saves the figure.
 
         Returns
         -------
@@ -410,7 +421,7 @@ class plotcloud:
                 png_path = save_path.replace('.pdf', '.png')
                 plt.savefig(png_path, dpi=dpi, bbox_inches='tight')
 
-        if show:
+        if interactive:
             plt.show()
 
         return fig, ax
