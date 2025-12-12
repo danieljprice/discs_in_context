@@ -18,11 +18,11 @@ REGIONS = {
         }
     },
     'lupus': {
-        'galactic': {
+        'galactic': {   # e.g. Figure 1 of Tachihara+1996
             'l_min': 334.0,
             'l_max': 344.0,
-            'b_min': 3.0,
-            'b_max': 13.0
+            'b_min': 8.0,
+            'b_max': 18.0
         },
         'icrs': {
             'ra_min': 15.5,
