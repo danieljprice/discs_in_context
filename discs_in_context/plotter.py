@@ -30,7 +30,8 @@ class plotcloud:
 
     def __init__(self, region=None, ra_range=None, dec_range=None,
                  galactic_l=None, galactic_b=None, coord_system='galactic',
-                 num_points=2048):
+                 num_points=2048, object=None, csvfile=None, image_size=None,
+                 image_size_unit='arcsec'):
         """
         Initialize the plotter with a region specification.
 
@@ -54,6 +55,15 @@ class plotcloud:
             Only used when region is None.
         num_points : int, default 2048
             Number of grid points for the extinction map.
+        object : str, optional
+            Object name to look up in CSV file (e.g., 'HD 142527').
+            Requires csvfile and image_size.
+        csvfile : str, optional
+            Path to CSV file with disc data. Required if object is provided.
+        image_size : float, optional
+            Size of the image in arcsec or degrees. Required if object is provided.
+        image_size_unit : str, default 'arcsec'
+            Unit for image_size: 'arcsec' or 'degrees'.
         """
         self.num_points = num_points
         self.coord_system = coord_system
@@ -65,14 +75,20 @@ class plotcloud:
         # Initialize coordinates based on input
         if region is not None:
             self._init_from_region(region)
+        elif object is not None:
+            if csvfile is None or image_size is None:
+                raise ValueError(
+                    "If 'object' is provided, both 'csvfile' and 'image_size' are required"
+                )
+            self._init_from_object(object, csvfile, image_size, image_size_unit)
         elif ra_range is not None and dec_range is not None:
             self._init_from_ra_dec(ra_range, dec_range)
         elif galactic_l is not None and galactic_b is not None:
             self._init_from_galactic(galactic_l, galactic_b)
         else:
             raise ValueError(
-                "Must provide either 'region', ('ra_range', 'dec_range'), "
-                "or ('galactic_l', 'galactic_b')"
+                "Must provide either 'region', 'object' (with csvfile and image_size), "
+                "('ra_range', 'dec_range'), or ('galactic_l', 'galactic_b')"
             )
 
         # Generate coordinate grid
@@ -133,6 +149,94 @@ class plotcloud:
         self.l_max = galactic_l['l_max']
         self.b_min = galactic_b['b_min']
         self.b_max = galactic_b['b_max']
+        self.l_span = self.l_max - self.l_min
+        self.b_span = self.b_max - self.b_min
+        self.max_span = max(self.l_span, self.b_span)
+
+    def _init_from_object(self, object, csvfile, image_size, image_size_unit='arcsec'):
+        """
+        Initialize from an object name looked up in a CSV file.
+
+        Parameters
+        ----------
+        object : str
+            Object name to search for in the CSV file (e.g., 'HD 142527').
+        csvfile : str
+            Path to CSV file containing disc data.
+        image_size : float
+            Size of the image in arcsec or degrees.
+        image_size_unit : str, default 'arcsec'
+            Unit for image_size: 'arcsec' or 'degrees'.
+        """
+        import pandas as pd
+        import os
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        # Expand user path
+        csvfile = os.path.expanduser(csvfile)
+
+        # Read CSV file
+        try:
+            df = pd.read_csv(csvfile, usecols=['target_id', 'l', 'b'])
+        except KeyError:
+            raise ValueError(
+                f"CSV file must contain columns: 'target_id', 'l', 'b'"
+            )
+
+        # Find the object
+        matches = df[df['target_id'] == object]
+        if len(matches) == 0:
+            raise ValueError(f"Object '{object}' not found in CSV file '{csvfile}'")
+        if len(matches) > 1:
+            raise ValueError(f"Multiple entries found for object '{object}' in CSV file")
+
+        # Get coordinates
+        l = matches.iloc[0]['l']
+        b = matches.iloc[0]['b']
+
+        # Convert image size to degrees
+        if image_size_unit == 'arcsec':
+            size_deg = image_size / 3600.0
+        elif image_size_unit == 'degrees':
+            size_deg = image_size
+        else:
+            raise ValueError(f"image_size_unit must be 'arcsec' or 'degrees', got '{image_size_unit}'")
+
+        # Create coordinate range centered on the source
+        half_size = size_deg / 2.0
+
+        # Convert to the desired coordinate system
+        if self.coord_system == 'galactic':
+            # Use galactic coordinates directly
+            self.l_min = l - half_size
+            self.l_max = l + half_size
+            self.b_min = b - half_size
+            self.b_max = b + half_size
+            self.l_span = self.l_max - self.l_min
+            self.b_span = self.b_max - self.b_min
+            self.max_span = max(self.l_span, self.b_span)
+        else:
+            # Convert to ICRS (RA/Dec)
+            coord = SkyCoord(l=l*u.deg, b=b*u.deg, frame='galactic')
+            ra_center = coord.icrs.ra.hourangle
+            dec_center = coord.icrs.dec.deg
+
+            # For RA, account for the fact that 1 degree of RA = 1/15 hours
+            # For small fields, we can approximate the size in RA hours
+            ra_half_size = half_size / 15.0
+            dec_half_size = half_size
+
+            self.ra_min = ra_center - ra_half_size
+            self.ra_max = ra_center + ra_half_size
+            self.dec_min = dec_center - dec_half_size
+            self.dec_max = dec_center + dec_half_size
+            self.ra_span = self.ra_max - self.ra_min
+            self.dec_span = self.dec_max - self.dec_min
+            self.max_span = max(self.ra_span, self.dec_span / 15.0)
+
+        # Store object name for title
+        self.object = object
 
     def _generate_coord_grid(self):
         """Generate the coordinate grid for extinction map calculation."""
@@ -536,11 +640,11 @@ class plotcloud:
             raise ValueError(f"Unknown dustmap: {dustmap}")
 
         # Format title: include region name if using a preset region
-        if self.region is not None:
+        if self.region is not None and self.region is not 'allsky':
             region_name = self.region.capitalize()
-            title = f'{dustmap_name} extinction map: {region_name}'
+            title = f'{dustmap_name} extinction map of {region_name}'
         else:
-            title = dustmap_name
+            title = f'{dustmap_name} extinction map'
 
         # For interactive plots, use smaller figure size for screen display
         # but maintain the same proportions
