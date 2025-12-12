@@ -60,8 +60,9 @@ class plotcloud:
         self.prev_positions = []
         self.overlap_range = 0.15
         self.overlap_range_ra = 0.1
+        self.region = region  # Store region name for title
 
-        # Initialize coordinates based on inpu
+        # Initialize coordinates based on input
         if region is not None:
             self._init_from_region(region)
         elif ra_range is not None and dec_range is not None:
@@ -522,17 +523,24 @@ class plotcloud:
         if dustmap == 'planck':
             planck = PlanckQuery()
             av = 3.1 * planck(self.coords)
-            title = 'Planck'
+            dustmap_name = 'Planck'
         elif dustmap == 'sfd':
             sfd = SFDQuery()
             av = 2.742 * sfd(self.coords)
-            title = 'SFD'
+            dustmap_name = 'SFD'
         elif dustmap == 'bayestar':
             bayestar = BayestarQuery(max_samples=1)
             av = 2.742 * bayestar(self.coords)
-            title = 'Bayestar'
+            dustmap_name = 'Bayestar'
         else:
             raise ValueError(f"Unknown dustmap: {dustmap}")
+
+        # Format title: include region name if using a preset region
+        if self.region is not None:
+            region_name = self.region.capitalize()
+            title = f'{dustmap_name} extinction map: {region_name}'
+        else:
+            title = dustmap_name
 
         # For interactive plots, use smaller figure size for screen display
         # but maintain the same proportions
