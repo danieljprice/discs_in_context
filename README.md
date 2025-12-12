@@ -4,12 +4,38 @@ A Python wrapper for plotting extinction maps of star-forming regions via the du
 
 ## Installation
 
-This package requires the following dependencies:
+### Install the Package
+
+Install in editable mode (recommended for development):
+
+```bash
+pip install -e .
+```
+
+Or install normally:
+
+```bash
+pip install .
+```
+
+### Dependencies
+
+This package requires the following dependencies (automatically installed with the package):
 - matplotlib
 - numpy
 - astropy
 - dustmaps (with Planck, SFD, and/or Bayestar maps downloaded)
 - pandas
+
+### Downloading Dust Maps
+
+After installing, you'll need to download the dust map data using the `dustmaps` command-line tools:
+
+```bash
+dustmaps_download planck
+dustmaps_download sfd
+dustmaps_download bayestar
+```
 
 ## Usage
 
@@ -52,6 +78,7 @@ fig, ax = plotter.plot(save_path='region_galactic.pdf')
 - `orion` - Orion molecular cloud
 - `ophiuchus` - Ophiuchus star-forming region
 - `chamaeleon` - Chamaeleon molecular cloud
+- `allsky` - Full sky view (0-360° galactic longitude, -90 to 90° latitude)
 
 ### Plotting Options
 
@@ -85,8 +112,8 @@ Main plotting class.
 - `region` (str): Preset region name
 - `ra_range` (tuple): (ra_min, ra_max) in hours
 - `dec_range` (tuple): (dec_min, dec_max) in degrees
-- `galactic_l` (dict): {'l0': center_l, 'lsize': half_size}
-- `galactic_b` (dict): {'b0': center_b, 'bsize': half_size}
+- `galactic_l` (dict): {'l_min': min_l, 'l_max': max_l}
+- `galactic_b` (dict): {'b_min': min_b, 'b_max': max_b}
 - `coord_system` (str): 'galactic' or 'icrs'
 - `num_points` (int): Grid resolution (default 2048)
 

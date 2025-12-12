@@ -72,6 +72,20 @@ REGIONS = {
             'dec_min': -80.0,
             'dec_max': -75.0
         }
+    },
+    'allsky': {
+        'galactic': {
+            'l_min': 0.0,
+            'l_max': 360.0,
+            'b_min': -90.0,
+            'b_max': 90.0
+        },
+        'icrs': {
+            'ra_min': 0.0,
+            'ra_max': 24.0,
+            'dec_min': -90.0,
+            'dec_max': 90.0
+        }
     }
 }
 
