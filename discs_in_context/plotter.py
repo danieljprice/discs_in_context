@@ -153,7 +153,84 @@ class plotcloud:
             l, b = np.meshgrid(l, b)
             self.coords = SkyCoord(l * units.deg,b * units.deg,frame='galactic')
 
-    def plot_all_discs(self, ax, csvfile=None):
+    def _setup_interactive_labels(self, ax, scatter_points, labels_data, scale_factor=1.0):
+        """
+        Set up interactive label display on hover/click for scatter points.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes containing the scatter points.
+        scatter_points : list
+            List of scatter plot objects.
+        labels_data : list
+            List of (label, x, y) tuples for each point.
+        scale_factor : float, default 1.0
+            Scale factor for annotation size (for interactive plots).
+        """
+        # Create annotation that will show labels
+        # Scale annotation size for interactive plots
+        annot = ax.annotate('', xy=(0, 0), xytext=(20 * scale_factor, 20 * scale_factor),
+                           textcoords="offset points",
+                           bbox=dict(boxstyle="round", fc="white", alpha=0.8,linewidth=0.5 * scale_factor),
+                           arrowprops=dict(arrowstyle="->", linewidth=0.5 * scale_factor),
+                           fontsize=10 * scale_factor)
+        annot.set_visible(False)
+
+        # Create a mapping from scatter plot to label indices
+        scatter_to_labels = {}
+        label_idx = 0
+        for scatter in scatter_points:
+            offsets = scatter.get_offsets()
+            if len(offsets.shape) == 2:
+                num_points = len(offsets)
+            else:
+                num_points = 1
+            scatter_to_labels[scatter] = list(range(label_idx, label_idx + num_points))
+            label_idx += num_points
+
+        def update_annot(scatter, idx):
+            """Update annotation for a given scatter point and index."""
+            label_list_idx = scatter_to_labels[scatter][idx]
+            if label_list_idx < len(labels_data):
+                label, x, y = labels_data[label_list_idx]
+                annot.xy = (x, y)
+                annot.set_text(label)
+                annot.set_visible(True)
+                ax.figure.canvas.draw_idle()
+
+        def hover(event):
+            """Handle mouse hover events."""
+            if event.inaxes == ax:
+                vis = annot.get_visible()
+                found = False
+                for scatter in scatter_points:
+                    cont, ind = scatter.contains(event)
+                    if cont:
+                        idx = ind["ind"][0]
+                        update_annot(scatter, idx)
+                        found = True
+                        break
+
+                if not found and vis:
+                    annot.set_visible(False)
+                    ax.figure.canvas.draw_idle()
+
+        def click(event):
+            """Handle mouse click events."""
+            if event.inaxes == ax:
+                for scatter in scatter_points:
+                    cont, ind = scatter.contains(event)
+                    if cont:
+                        idx = ind["ind"][0]
+                        update_annot(scatter, idx)
+                        break
+
+        # Connect event handlers
+        ax.figure.canvas.mpl_connect("motion_notify_event", hover)
+        ax.figure.canvas.mpl_connect("button_press_event", click)
+
+    def plot_all_discs(self, ax, csvfile=None, interactive=False, font_scale=1.0, marker_scale=1.0):
         """
         Plot all protoplanetary discs from a CSV file.
 
@@ -163,6 +240,8 @@ class plotcloud:
             Axes to plot on.
         csvfile : str, optional
             Path to CSV file with disc data. If None, uses default path.
+        interactive : bool, default False
+            If True, labels are shown on hover/click instead of always visible.
         """
         import pandas as pd
 
@@ -179,14 +258,29 @@ class plotcloud:
         x_min, x_max = min(xlim), max(xlim)
         y_min, y_max = min(ylim), max(ylim)
 
+        # Store scatter points for interactive mode
+        scatter_points = []
+        labels_data = []
+
         for i in range(nd):
             label, l, b = df.loc[i, :]
             # Only plot if within plot limits
             if x_min <= l <= x_max and y_min <= b <= y_max:
-                ax.scatter(l, b, marker='*', s=5, color='cyan')
-                ax.text(l - 0.02, b, label, color='cyan', va='top', ha='right')
+                scatter = ax.scatter(l, b, marker='*', s=5 * marker_scale, color='cyan')
+                scatter_points.append(scatter)
+                labels_data.append((label, l, b))
+                if not interactive:
+                    # Scale label offset with font size
+                    offset = 0.02 * font_scale
+                    ax.text(l - offset, b, label, color='cyan', va='top', ha='right',
+                           fontsize=10 * font_scale)
 
-    def plot_kenyon08_pms(self, ax, csvfile=None, plot_label_filter=None):
+        # Set up interactive label display
+        if interactive and scatter_points:
+            scale = getattr(self, '_interactive_scale', 1.0)
+            self._setup_interactive_labels(ax, scatter_points, labels_data, scale_factor=scale)
+
+    def plot_kenyon08_pms(self, ax, csvfile=None, plot_label_filter=None, interactive=False, font_scale=1.0, marker_scale=1.0):
         """
         Plot PMS sources from Kenyon 2008 catalog.
 
@@ -199,6 +293,8 @@ class plotcloud:
         plot_label_filter : callable, optional
             Function that takes a label string and returns True if label
             should be plotted. If None, uses default filter.
+        interactive : bool, default False
+            If True, labels are shown on hover/click instead of always visible.
         """
         import pandas as pd
 
@@ -234,6 +330,10 @@ class plotcloud:
         x_min, x_max = min(xlim), max(xlim)
         y_min, y_max = min(ylim), max(ylim)
 
+        # Store scatter points and labels for interactive mode
+        scatter_points = []
+        labels_data = []
+
         for i in range(nd):
             label, ra_str, dec_str = df.loc[i, :]
             co1 = SkyCoord(
@@ -254,32 +354,49 @@ class plotcloud:
                     plot_label = plot_label_filter(label)
 
                     if plot_label:
-                        # Check for position overlap
-                        ral = ra1 - 0.05
-                        decl = dec1
-                        angle = 0.0
-                        while (any(abs(ral - ra_prev) <= self.overlap_range_ra and
-                                  abs(decl - dec_prev) <= self.overlap_range
-                                  for ra_prev, dec_prev in self.prev_positions)):
-                            decl = decl + self.overlap_range
+                        scatter = ax.scatter(ra1, dec1, marker='*', s=10 * marker_scale, color='cyan')
+                        if interactive:
+                            scatter_points.append(scatter)
+                            labels_data.append((label, ra1, dec1))
+                        if not interactive:
+                            # Check for position overlap
+                            # Scale label offset with font size
+                            offset_ra = 0.05 * font_scale
+                            ral = ra1 - offset_ra
+                            decl = dec1
+                            angle = 0.0
+                            # Scale overlap ranges with font size
+                            scaled_overlap_ra = self.overlap_range_ra * font_scale
+                            scaled_overlap = self.overlap_range * font_scale
+                            while (any(abs(ral - ra_prev) <= scaled_overlap_ra and
+                                      abs(decl - dec_prev) <= scaled_overlap
+                                      for ra_prev, dec_prev in self.prev_positions)):
+                                decl = decl + scaled_overlap
 
-                        ax.text(
-                            ral, decl, label,
-                            color='cyan', va='top', ha='left',
-                            size=10, clip_on=True, rotation=angle
-                        )
-                        self.prev_positions.append((ral, decl))
-                        ax.scatter(ra1, dec1, marker='*', s=10, color='cyan')
+                            ax.text(
+                                ral, decl, label,
+                                color='cyan', va='top', ha='left',
+                                size=10 * font_scale, clip_on=True, rotation=angle
+                            )
+                            self.prev_positions.append((ral, decl))
                     else:
-                        ax.scatter(ra1, dec1, marker='*', s=10, color='white')
+                        ax.scatter(ra1, dec1, marker='*', s=10 * marker_scale, color='white')
             else:  # galactic
                 galactic_coords = co1.galactic
                 l, b = (galactic_coords.l.degree[0], galactic_coords.b.degree[0])
                 # Only plot if within plot limits
                 if x_min <= l <= x_max and y_min <= b <= y_max:
-                    ax.scatter(l, b, marker='*', s=3, color='white')
+                    scatter = ax.scatter(l, b, marker='*', s=10 * marker_scale, color='white')
+                    if plot_label_filter(label):
+                        scatter_points.append(scatter)
+                        labels_data.append((label, l, b))
 
-    def plot(self, dustmap='planck', figsize=(20, 10), dpi=300,
+        # Set up interactive label display
+        if interactive and scatter_points:
+            scale = getattr(self, '_interactive_scale', 1.0)
+            self._setup_interactive_labels(ax, scatter_points, labels_data, scale_factor=scale)
+
+    def plot(self, dustmap='planck', figsize=(15, 12), dpi=300,
              vmin=0.0, vmax=2.0, cmap=None, plot_discs=False,
              plot_pms=True, pms_csvfile=None, discs_csvfile=None,
              pms_label_filter=None, save_path=None, interactive=False):
@@ -339,9 +456,43 @@ class plotcloud:
         else:
             raise ValueError(f"Unknown dustmap: {dustmap}")
 
+        # For interactive plots, use smaller figure size for screen display
+        # but maintain the same proportions
+        if interactive:
+            # Scale down to fit screen better (e.g., 60% of original size)
+            scale_factor = 0.2
+            display_figsize = (figsize[0] * scale_factor, figsize[1] * scale_factor)
+            display_dpi = dpi
+        else:
+            scale_factor = 1.0
+            display_figsize = figsize
+            display_dpi = dpi
+
         # Create figure
-        fig = plt.figure(figsize=figsize, dpi=dpi)
+        fig = plt.figure(figsize=display_figsize, dpi=display_dpi)
         ax = fig.add_subplot(1, 1, 1)
+
+        # Scale font sizes, line widths, and other elements for interactive display
+        if interactive:
+            # Get current default font sizes and scale them
+            import matplotlib as mpl
+            default_fontsize = mpl.rcParams['font.size']
+            scaled_fontsize = default_fontsize * scale_factor
+            # Scale tick label padding and title padding
+            tick_pad = 2 * scale_factor
+            title_pad = 4 * scale_factor
+            ax.tick_params(labelsize=scaled_fontsize, width=scale_factor, length=4 * scale_factor, pad=tick_pad)
+            ax.xaxis.label.set_fontsize(scaled_fontsize)
+            ax.yaxis.label.set_fontsize(scaled_fontsize)
+            ax.title.set_fontsize(scaled_fontsize)
+            # Store for later use
+            self._title_pad = title_pad
+            self._scaled_fontsize = scaled_fontsize
+            # Scale axis spines (border lines)
+            for spine in ax.spines.values():
+                spine.set_linewidth(0.5 * scale_factor)
+            # Store scale factor for later use in grid lines and annotations
+            self._interactive_scale = scale_factor
 
         # Set colormap
         if cmap is None:
@@ -366,8 +517,10 @@ class plotcloud:
             )
             ax.set_xlim(self.ra_max * 15.0, self.ra_min * 15.0)
             ax.set_ylim(self.dec_min, self.dec_max)
-            ax.set_xlabel('RA (J2000)')
-            ax.set_ylabel('Dec (J2000)')
+            # Scale label offsets (labelpad) for interactive plots
+            labelpad = 3 * scale_factor if interactive else 3
+            ax.set_xlabel('RA (J2000)', labelpad=labelpad)
+            ax.set_ylabel('Dec (J2000)', labelpad=labelpad)
 
             formatter = matplotlib.ticker.FuncFormatter(
                 lambda ra, x: time.strftime(
@@ -376,8 +529,9 @@ class plotcloud:
                 )
             )
             ax.xaxis.set_major_formatter(formatter)
-            plt.grid(axis='x', color='0.3', linestyle='dashed', alpha=0.3)
-            plt.grid(axis='y', color='0.3', linestyle='dashed', alpha=0.3)
+            grid_linewidth = 0.3 * (getattr(self, '_interactive_scale', 1.0))
+            plt.grid(axis='x', color='0.3', linestyle='dashed', alpha=0.3, linewidth=grid_linewidth)
+            plt.grid(axis='y', color='0.3', linestyle='dashed', alpha=0.3, linewidth=grid_linewidth)
         else:  # galactic
             ax.imshow(
                 np.sqrt(av)[::, ::-1],
@@ -396,30 +550,108 @@ class plotcloud:
             )
             ax.set_xlim(self.l_min, self.l_max)
             ax.set_ylim(self.b_min, self.b_max)
-            ax.set_xlabel('Galactic longitude')
-            ax.set_ylabel('Galactic latitude')
+            # Scale label offsets (labelpad) for interactive plots
+            labelpad = 3 * scale_factor if interactive else 3
+            ax.set_xlabel('Galactic longitude', labelpad=labelpad)
+            ax.set_ylabel('Galactic latitude', labelpad=labelpad)
             ax.set_aspect('equal')
 
         # Plot sources
+        # Scale markers by the same factor as font size for interactive plots
+        marker_scale = scale_factor**2 if interactive else 1.0
+
         if plot_discs:
-            self.plot_all_discs(ax, csvfile=discs_csvfile)
+            self.plot_all_discs(ax, csvfile=discs_csvfile, interactive=interactive,
+                               font_scale=scale_factor, marker_scale=marker_scale)
 
         if plot_pms:
             self.plot_kenyon08_pms(
                 ax,
                 csvfile=pms_csvfile,
-                plot_label_filter=pms_label_filter
+                plot_label_filter=pms_label_filter,
+                interactive=interactive,
+                font_scale=scale_factor,
+                marker_scale=marker_scale
             )
 
-        ax.set_title(title)
-        fig.subplots_adjust(wspace=0.0, hspace=0.0)
+        # Set title with scaled padding and font size for interactive plots
+        if interactive:
+            title_pad = getattr(self, '_title_pad', 4.0)
+            scaled_fontsize = getattr(self, '_scaled_fontsize', None)
+            if scaled_fontsize:
+                ax.set_title(title, pad=title_pad, fontsize=scaled_fontsize)
+            else:
+                ax.set_title(title, pad=title_pad)
+        else:
+            ax.set_title(title, pad=4.0)
+
+        # Adjust layout to ensure title and labels are visible
+        # For interactive plots, use tight_layout with minimal padding
+        if interactive:
+            fig.tight_layout(pad=0.3, rect=[0, 0, 1, 0.98])  # Minimal padding, leave small space for title
+        else:
+            fig.subplots_adjust(wspace=0.0, hspace=0.0, top=0.95, bottom=0.1, left=0.1, right=0.95)
 
         if save_path:
+            # Save with original figure size and DPI for high quality
+            # Temporarily resize figure and restore font sizes for saving
+            original_figsize = fig.get_size_inches()
+            if interactive:
+                # Restore original font sizes and line widths for saving
+                import matplotlib as mpl
+                default_fontsize = mpl.rcParams['font.size']
+                ax.tick_params(labelsize=default_fontsize, width=1.0, length=4.0)
+                ax.xaxis.label.set_fontsize(default_fontsize)
+                ax.yaxis.label.set_fontsize(default_fontsize)
+                ax.title.set_fontsize(default_fontsize)
+                # Restore label offsets
+                ax.set_xlabel(ax.get_xlabel(), labelpad=3)
+                ax.set_ylabel(ax.get_ylabel(), labelpad=3)
+                # Restore grid line widths
+                for line in ax.xaxis.get_gridlines():
+                    line.set_linewidth(0.3)
+                for line in ax.yaxis.get_gridlines():
+                    line.set_linewidth(0.3)
+                # Restore axis spine line widths
+                for spine in ax.spines.values():
+                    spine.set_linewidth(0.5)
+                # Restore subplots_adjust for saved plots
+                fig.subplots_adjust(wspace=0.0, hspace=0.0)
+
+            fig.set_size_inches(figsize)
             plt.savefig(save_path, bbox_inches='tight', dpi=dpi)
             if save_path.endswith('.pdf'):
                 # Also save PNG version
                 png_path = save_path.replace('.pdf', '.png')
                 plt.savefig(png_path, dpi=dpi, bbox_inches='tight')
+
+            # Restore display size and scaled fonts/line widths if interactive
+            if interactive:
+                fig.set_size_inches(display_figsize)
+                # Restore scaled font sizes and line widths
+                scaled_fontsize = default_fontsize * scale_factor
+                tick_pad = 2 * scale_factor
+                title_pad = 4 * scale_factor
+                ax.tick_params(labelsize=scaled_fontsize, width=scale_factor, length=4 * scale_factor, pad=tick_pad)
+                ax.xaxis.label.set_fontsize(scaled_fontsize)
+                ax.yaxis.label.set_fontsize(scaled_fontsize)
+                ax.title.set_fontsize(scaled_fontsize)
+                # Restore scaled label offsets and title padding
+                labelpad = 3 * scale_factor
+                ax.set_xlabel(ax.get_xlabel(), labelpad=labelpad)
+                ax.set_ylabel(ax.get_ylabel(), labelpad=labelpad)
+                ax.set_title(ax.get_title(), pad=title_pad, fontsize=scaled_fontsize)
+                # Restore grid line widths
+                grid_linewidth = 0.3 * scale_factor
+                for line in ax.xaxis.get_gridlines():
+                    line.set_linewidth(grid_linewidth)
+                for line in ax.yaxis.get_gridlines():
+                    line.set_linewidth(grid_linewidth)
+                # Restore axis spine line widths
+                for spine in ax.spines.values():
+                    spine.set_linewidth(0.5 * scale_factor)
+                # Restore tight layout for interactive
+                fig.tight_layout(pad=0.3, rect=[0, 0, 1, 0.98])
 
         if interactive:
             plt.show()
