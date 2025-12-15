@@ -474,7 +474,8 @@ class plotcloud:
             scale = getattr(self, '_interactive_scale', 1.0)
             self._setup_interactive_labels(ax, scatter_points, labels_data, scale_factor=scale)
 
-    def plot_kenyon08_pms(self, ax, csvfile=None, plot_label_filter=None, interactive=False, font_scale=1.0, marker_scale=1.0):
+    def plot_kenyon08_pms(self, ax, csvfile=None, only_label_famous=False,
+                          interactive=False, font_scale=1.0, marker_scale=1.0):
         """
         Plot PMS sources from Kenyon 2008 catalog.
 
@@ -484,9 +485,10 @@ class plotcloud:
             Axes to plot on.
         csvfile : str, optional
             Path to CSV file with PMS data. If None, uses default path.
-        plot_label_filter : callable, optional
-            Function that takes a label string and returns True if label
-            should be plotted. If None, uses default filter.
+        only_label_famous : bool, default False
+            If True, only label "famous" objects (non-catalogue names)
+            based on a built-in heuristic. If False, labels are plotted
+            for all sources within the plot region.
         interactive : bool, default False
             If True, labels are shown on hover/click instead of always visible.
         """
@@ -507,24 +509,23 @@ class plotcloud:
         nd = df.shape[0]
         print(f"got {nd} PMS sources")
 
-        if plot_label_filter is None:
-            def plot_label_filter(label):
-                # Default: only plot "famous" objects (not catalog numbers)
-                return not (label.startswith("J0") or
-                           label.startswith("I0") or
-                           label.startswith("IC") or
-                           label.startswith("J1") or
-                           label.startswith("JH") or
-                           label.startswith("ITG") or
-                           label.startswith("Haro") or
-                           label.startswith("XEST") or
-                           label.startswith("CFHT") or
-                           label.startswith("V410") or
-                           label.startswith("MHO") or
-                           label.startswith("LR1") or
-                           label.startswith("Hubble") or
-                           label.startswith("Anon") or
-                           label.startswith("KPNO"))
+        def _is_famous_label(label: str) -> bool:
+            """Return True if label is considered 'famous' (not a catalogue ID)."""
+            return not (label.startswith("J0") or
+                        label.startswith("I0") or
+                        label.startswith("IC") or
+                        label.startswith("J1") or
+                        label.startswith("JH") or
+                        label.startswith("ITG") or
+                        label.startswith("Haro") or
+                        label.startswith("XEST") or
+                        label.startswith("CFHT") or
+                        label.startswith("V410") or
+                        label.startswith("MHO") or
+                        label.startswith("LR1") or
+                        label.startswith("Hubble") or
+                        label.startswith("Anon") or
+                        label.startswith("KPNO"))
 
         # Get plot limits
         xlim = ax.get_xlim()
@@ -553,7 +554,7 @@ class plotcloud:
                 in_x_range = (x_min <= ra1_deg <= x_max) if x_min < x_max else (x_max <= ra1_deg <= x_min)
                 # Only plot if within plot limits
                 if in_x_range and y_min <= dec1 <= y_max:
-                    plot_label = plot_label_filter(label)
+                    plot_label = _is_famous_label(label) if only_label_famous else True
 
                     if plot_label:
                         scatter = ax.scatter(ra1, dec1, marker='*', s=10 * marker_scale, color='cyan')
@@ -588,10 +589,34 @@ class plotcloud:
                 l, b = (galactic_coords.l.degree[0], galactic_coords.b.degree[0])
                 # Only plot if within plot limits
                 if x_min <= l <= x_max and y_min <= b <= y_max:
-                    scatter = ax.scatter(l, b, marker='*', s=10 * marker_scale, color='white')
-                    if plot_label_filter(label):
-                        scatter_points.append(scatter)
-                        labels_data.append((label, l, b))
+                    plot_label = _is_famous_label(label) if only_label_famous else True
+
+                    if plot_label:
+                        scatter = ax.scatter(l, b, marker='*', s=10 * marker_scale, color='cyan')
+                        if interactive:
+                            scatter_points.append(scatter)
+                            labels_data.append((label, l, b))
+                        if not interactive:
+                            # For galactic axes, treat l like RA and b like Dec
+                            offset_l = 0.05 * font_scale
+                            ll = l - offset_l
+                            bb = b
+                            angle = 0.0
+                            scaled_overlap_l = self.overlap_range_ra * font_scale
+                            scaled_overlap = self.overlap_range * font_scale
+                            while (any(abs(ll - l_prev) <= scaled_overlap_l and
+                                      abs(bb - b_prev) <= scaled_overlap
+                                      for l_prev, b_prev in self.prev_positions)):
+                                bb = bb + scaled_overlap
+
+                            ax.text(
+                                ll, bb, label,
+                                color='cyan', va='top', ha='left',
+                                size=10 * font_scale, clip_on=True, rotation=angle
+                            )
+                            self.prev_positions.append((ll, bb))
+                    else:
+                        ax.scatter(l, b, marker='*', s=10 * marker_scale, color='white')
 
         # Set up interactive label display
         if interactive and scatter_points:
@@ -601,7 +626,7 @@ class plotcloud:
     def plot(self, dustmap='planck', figsize=(15, 12), dpi=300,
              vmin=0.0, vmax=2.0, cmap=None, plot_discs=False,
              plot_pms=True, pms_csvfile=None, discs_csvfile=None,
-             pms_label_filter=None, save_path=None, interactive=False):
+             only_label_famous=False, save_path=None, interactive=False):
         """
         Create the extinction map plot.
 
@@ -627,8 +652,9 @@ class plotcloud:
             Path to PMS CSV file.
         discs_csvfile : str, optional
             Path to discs CSV file.
-        pms_label_filter : callable, optional
-            Filter function for PMS labels.
+        only_label_famous : bool, default False
+            If True, only label "famous" PMS objects (non-catalogue names),
+            using the same heuristic as in plot_kenyon08_pms.
         save_path : str, optional
             Path to save figure. If None and interactive=False, doesn't save.
         interactive : bool, default False
@@ -659,7 +685,7 @@ class plotcloud:
             raise ValueError(f"Unknown dustmap: {dustmap}")
 
         # Format title: include region name if using a preset region
-        if self.region is not None and self.region is not 'allsky':
+        if self.region is not None and self.region != 'allsky':
             region_name = self.region.capitalize()
             title = f'{dustmap_name} extinction map of {region_name}'
         else:
@@ -762,7 +788,7 @@ class plotcloud:
             self.plot_kenyon08_pms(
                 ax,
                 csvfile=pms_csvfile,
-                plot_label_filter=pms_label_filter,
+                only_label_famous=only_label_famous,
                 interactive=interactive,
                 font_scale=scale_factor,
                 marker_scale=marker_scale
