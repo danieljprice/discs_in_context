@@ -62,9 +62,12 @@ class plotcloud:
             Path to discs CSV file. If None, uses the copy bundled in the
             package data directory.
         image_size : float, optional
-            Size of the image in arcsec or degrees around the object.
+            Size of the image in arcsec or degrees around the object. If
+            omitted when ``object`` is provided, a default of 2 degrees is
+            used.
         image_size_unit : str, default 'arcsec'
-            Unit for image_size: 'arcsec' or 'degrees'.
+            Unit for image_size: 'arcsec' or 'degrees'. Ignored if
+            image_size is omitted and the default is used.
         """
         self.num_points = num_points
         self.coord_system = coord_system
@@ -77,11 +80,12 @@ class plotcloud:
         if region is not None:
             self._init_from_region(region)
         elif object is not None:
+            # If no explicit image_size is provided, fall back to the
+            # defaults in _init_from_object (2 degrees).
             if image_size is None:
-                raise ValueError(
-                    "If 'object' is provided, 'image_size' is also required"
-                )
-            self._init_from_object(object, csvfile, image_size, image_size_unit)
+                self._init_from_object(object, csvfile)
+            else:
+                self._init_from_object(object, csvfile, image_size, image_size_unit)
         elif ra_range is not None and dec_range is not None:
             self._init_from_ra_dec(ra_range, dec_range)
         elif galactic_l is not None and galactic_b is not None:
@@ -154,7 +158,7 @@ class plotcloud:
         self.b_span = self.b_max - self.b_min
         self.max_span = max(self.l_span, self.b_span)
 
-    def _init_from_object(self, object, csvfile, image_size, image_size_unit='arcsec'):
+    def _init_from_object(self, object, csvfile, image_size=2.0, image_size_unit='degrees'):
         """
         Initialize from an object name looked up in a CSV file.
 
@@ -167,7 +171,7 @@ class plotcloud:
             bundled discs catalogue in the package data directory.
         image_size : float
             Size of the image in arcsec or degrees.
-        image_size_unit : str, default 'arcsec'
+        image_size_unit : str, default 'degrees'
             Unit for image_size: 'arcsec' or 'degrees'.
         """
         import os
@@ -195,7 +199,13 @@ class plotcloud:
         if len(matches) == 0:
             raise ValueError(f"Object '{object}' not found in CSV file '{csvfile}'")
         if len(matches) > 1:
-            raise ValueError(f"Multiple entries found for object '{object}' in CSV file")
+            import warnings
+
+            warnings.warn(
+                f"Multiple entries found for object '{object}' in CSV file; "
+                "using the first match.",
+                RuntimeWarning,
+            )
 
         # Get coordinates
         l = matches.iloc[0]['l']

@@ -12,10 +12,16 @@ plot1.plot(
     plot_discs=True,plot_pms=True,interactive=True,dustmap='planck'
 )
 
-# Example 4: Different region (Lupus)
-plot4 = pc(region='lupus', coord_system='galactic')
-fig4, ax4 = plot4.plot(
+# Example 2: Different region (Lupus)
+plot2 = pc(region='lupus', coord_system='galactic')
+fig2, ax2 = plot2.plot(
     save_path='lupus_galactic.pdf',plot_discs=True,
     interactive=True
+)
+
+# Example 3: around a specific object
+plot3 = pc(object='AB Aur', coord_system='icrs')
+fig3, ax3 = plot3.plot(
+    save_path='ab_aur_icrs.pdf',plot_discs=True,plot_pms=True,interactive=True,dustmap='planck'
 )
 
