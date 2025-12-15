@@ -626,7 +626,8 @@ class plotcloud:
     def plot(self, dustmap='planck', figsize=(15, 12), dpi=300,
              vmin=0.0, vmax=2.0, cmap=None, plot_discs=False,
              plot_pms=True, pms_csvfile=None, discs_csvfile=None,
-             only_label_famous=False, save_path=None, interactive=False):
+             only_label_famous=False, bayestar_distance=None,
+             save_path=None, interactive=False):
         """
         Create the extinction map plot.
 
@@ -655,6 +656,11 @@ class plotcloud:
         only_label_famous : bool, default False
             If True, only label "famous" PMS objects (non-catalogue names),
             using the same heuristic as in plot_kenyon08_pms.
+        bayestar_distance : float or astropy.units.Quantity, optional
+            Distance at which to evaluate the Bayestar dust map when
+            ``dustmap='bayestar'``. If given as a float, it is interpreted
+            as kiloparsecs. If None, the map is integrated along the entire
+            line of sight using the maximum E(B−V) in each direction.
         save_path : str, optional
             Path to save figure. If None and interactive=False, doesn't save.
         interactive : bool, default False
@@ -679,7 +685,39 @@ class plotcloud:
             dustmap_name = 'SFD'
         elif dustmap == 'bayestar':
             bayestar = BayestarQuery(max_samples=1)
-            av = 2.742 * bayestar(self.coords)
+
+            # If a distance is provided, evaluate Bayestar at that distance.
+            # Otherwise, integrate along the line of sight by taking the
+            # maximum E(B−V) value along the distance axis.
+            if bayestar_distance is not None:
+                from astropy import units as u
+
+                dist = bayestar_distance
+                if not hasattr(dist, 'unit'):
+                    dist = dist * u.kpc
+
+                if self.coord_system == 'icrs':
+                    coords_dist = SkyCoord(
+                        ra=self.coords.ra,
+                        dec=self.coords.dec,
+                        distance=dist,
+                        frame='icrs'
+                    )
+                else:
+                    coords_dist = SkyCoord(
+                        l=self.coords.l,
+                        b=self.coords.b,
+                        distance=dist,
+                        frame='galactic'
+                    )
+                ebv = bayestar(coords_dist)
+            else:
+                ebv = bayestar(self.coords)
+                # Bayestar returns E(B−V) vs distance: collapse distance axis.
+                if ebv.ndim == 3:
+                    ebv = np.nanmax(ebv, axis=-1)
+
+            av = 2.742 * ebv
             dustmap_name = 'Bayestar'
         else:
             raise ValueError(f"Unknown dustmap: {dustmap}")
