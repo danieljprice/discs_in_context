@@ -16,7 +16,6 @@ from dustmaps.bayestar import BayestarQuery
 
 from .regions import REGIONS
 
-
 class plotcloud:
     """
     A class for plotting extinction maps of star-forming regions with
@@ -56,12 +55,14 @@ class plotcloud:
         num_points : int, default 2048
             Number of grid points for the extinction map.
         object : str, optional
-            Object name to look up in CSV file (e.g., 'HD 142527').
-            Requires csvfile and image_size.
+            Object name to look up in the discs CSV file (e.g., 'HD 142527').
+            If provided, initializes the map centred on this object using
+            coordinates from the discs catalogue.
         csvfile : str, optional
-            Path to CSV file with disc data. Required if object is provided.
+            Path to discs CSV file. If None, uses the copy bundled in the
+            package data directory.
         image_size : float, optional
-            Size of the image in arcsec or degrees. Required if object is provided.
+            Size of the image in arcsec or degrees around the object.
         image_size_unit : str, default 'arcsec'
             Unit for image_size: 'arcsec' or 'degrees'.
         """
@@ -76,9 +77,9 @@ class plotcloud:
         if region is not None:
             self._init_from_region(region)
         elif object is not None:
-            if csvfile is None or image_size is None:
+            if image_size is None:
                 raise ValueError(
-                    "If 'object' is provided, both 'csvfile' and 'image_size' are required"
+                    "If 'object' is provided, 'image_size' is also required"
                 )
             self._init_from_object(object, csvfile, image_size, image_size_unit)
         elif ra_range is not None and dec_range is not None:
@@ -161,28 +162,33 @@ class plotcloud:
         ----------
         object : str
             Object name to search for in the CSV file (e.g., 'HD 142527').
-        csvfile : str
-            Path to CSV file containing disc data.
+        csvfile : str or None
+            Path to CSV file containing disc data. If None, uses the
+            bundled discs catalogue in the package data directory.
         image_size : float
             Size of the image in arcsec or degrees.
         image_size_unit : str, default 'arcsec'
             Unit for image_size: 'arcsec' or 'degrees'.
         """
-        import pandas as pd
         import os
+        import pandas as pd
         from astropy.coordinates import SkyCoord
         import astropy.units as u
 
-        # Expand user path
-        csvfile = os.path.expanduser(csvfile)
+        # If no CSV path is provided, use the bundled discs catalogue
+        if csvfile is None:
+            from . import data_utils
 
-        # Read CSV file
+            csvfile = data_utils.get_discs_catalog_path()
+
+        # Expand user path and read CSV file
+        csvfile = os.path.expanduser(str(csvfile))
         try:
             df = pd.read_csv(csvfile, usecols=['target_id', 'l', 'b'])
-        except KeyError:
+        except KeyError as exc:
             raise ValueError(
-                f"CSV file must contain columns: 'target_id', 'l', 'b'"
-            )
+                "Discs CSV file must contain columns: 'target_id', 'l', 'b'"
+            ) from exc
 
         # Find the object
         matches = df[df['target_id'] == object]
@@ -426,11 +432,16 @@ class plotcloud:
         interactive : bool, default False
             If True, labels are shown on hover/click instead of always visible.
         """
+        import os
         import pandas as pd
 
+        # If no CSV path is provided, use the bundled discs catalogue
         if csvfile is None:
-            csvfile = '~/Documents/papers/gaia/circumstellar-disks-dr3-result-v2.csv'
+            from . import data_utils
 
+            csvfile = data_utils.get_discs_catalog_path()
+
+        csvfile = os.path.expanduser(str(csvfile))
         df = pd.read_csv(csvfile, usecols=['target_id', 'l', 'b'])
         nd = df.shape[0]
         print(f"got {nd} discs")
@@ -479,11 +490,19 @@ class plotcloud:
         interactive : bool, default False
             If True, labels are shown on hover/click instead of always visible.
         """
+        import os
         import pandas as pd
 
+        # Load PMS catalogue:
+        # - If csvfile is None, look up the copy bundled inside the
+        #   discs_in_context/data directory.
+        # - If csvfile is provided, fall back to reading from the user-specified path.
         if csvfile is None:
-            csvfile = '~/Observations/dustmaps/tau-sources.csv'
+            from . import data_utils
 
+            csvfile = data_utils.get_tau_sources_path()
+
+        csvfile = os.path.expanduser(str(csvfile))
         df = pd.read_csv(csvfile, usecols=['PMS', 'RA', 'Dec'])
         nd = df.shape[0]
         print(f"got {nd} PMS sources")
