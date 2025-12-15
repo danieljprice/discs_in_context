@@ -1,6 +1,8 @@
 # Discs in Context
 
-A Python wrapper for plotting extinction maps of star-forming regions via the dustmaps package, with protostars and protoplanetary discs overlaid.
+A Python wrapper for plotting extinction maps of star-forming regions via the dustmaps package, with protostars and protoplanetary discs overlaid, e.g.:
+
+<img width="990" height="917" alt="image" src="https://github.com/user-attachments/assets/a5c97092-34d3-476c-84bf-06d920843b80" />
 
 ## Installation
 
