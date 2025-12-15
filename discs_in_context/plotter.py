@@ -342,6 +342,63 @@ class plotcloud:
         ax.set_ylabel(ax.get_ylabel(), labelpad=3)
         ax.set_title(ax.get_title(), pad=4.0, fontsize=default_fontsize)
 
+    def _place_non_overlapping_label(self, ax, x, y, label, font_scale,
+                                     color='cyan', ha='left',
+                                     offset_factor=0.05):
+        """
+        Place a text label near (x, y) while trying to avoid overlap with
+        previously drawn labels.
+
+        This works for both RA/Dec and Galactic coordinates since it only
+        uses the plotted x/y positions and the shared overlap ranges.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes to draw on.
+        x, y : float
+            Data coordinates of the associated point.
+        label : str
+            Text label to draw.
+        font_scale : float
+            Scale factor applied to the base font size and overlap ranges.
+        color : str, optional
+            Text colour.
+        ha : str, optional
+            Horizontal alignment ('left' or 'right').
+        offset_factor : float, optional
+            Horizontal offset (in data units) as a multiple of font_scale.
+        """
+        # Horizontal offset from the point
+        offset_x = offset_factor * font_scale
+        label_x = x - offset_x if ha == 'right' else x + offset_x
+        label_y = y
+
+        # Scale overlap ranges with font size
+        scaled_overlap_x = self.overlap_range_ra * font_scale
+        scaled_overlap_y = self.overlap_range * font_scale
+
+        # Shift the label upwards until it no longer overlaps previous ones
+        while any(
+            abs(label_x - x_prev) <= scaled_overlap_x and
+            abs(label_y - y_prev) <= scaled_overlap_y
+            for x_prev, y_prev in self.prev_positions
+        ):
+            label_y += scaled_overlap_y
+
+        ax.text(
+            label_x,
+            label_y,
+            label,
+            color=color,
+            va='top',
+            ha=ha,
+            size=10 * font_scale,
+            clip_on=True,
+            rotation=0.0,
+        )
+        self.prev_positions.append((label_x, label_y))
+
     def _setup_interactive_labels(self, ax, scatter_points, labels_data, scale_factor=1.0):
         """
         Set up interactive label display on hover/click for scatter points.
@@ -442,7 +499,21 @@ class plotcloud:
             csvfile = data_utils.get_discs_catalog_path()
 
         csvfile = os.path.expanduser(str(csvfile))
-        df = pd.read_csv(csvfile, usecols=['target_id', 'l', 'b'])
+        df = pd.read_csv(csvfile)
+
+        # Ensure required columns exist
+        required_cols = {'target_id', 'l', 'b'}
+        missing = required_cols.difference(df.columns)
+        if missing:
+            missing_str = ', '.join(sorted(missing))
+            raise ValueError(f"Discs CSV file is missing required columns: {missing_str}")
+
+        # Optional distance column (specific to discs catalogue)
+        disc_distance_col = None
+        for cand in ('Distance', 'distance_pc', 'dist_pc', 'distance', 'dist'):
+            if cand in df.columns:
+                disc_distance_col = cand
+                break
         nd = df.shape[0]
         print(f"got {nd} discs")
 
@@ -455,19 +526,75 @@ class plotcloud:
         # Store scatter points for interactive mode
         scatter_points = []
         labels_data = []
+        disc_label_set = set()
 
         for i in range(nd):
-            label, l, b = df.loc[i, :]
+            row = df.loc[i, :]
+            label = row['target_id']
+            l = row['l']
+            b = row['b']
+
+            # Build display label for interactive mode (optionally including distance)
+            if disc_distance_col is not None:
+                dist_val = row[disc_distance_col]
+                try:
+                    if np.isfinite(dist_val):
+                        display_label = f"{label} ({dist_val:.0f} pc)"
+                    else:
+                        display_label = label
+                except TypeError:
+                    display_label = label
+            else:
+                display_label = label
+
+            # Transform to the plotting coordinate system
+            if self.coord_system == 'icrs':
+                # Convert galactic (l, b) to ICRS (RA, Dec)
+                co = SkyCoord(l * units.deg, b * units.deg, frame='galactic')
+                x = co.icrs.ra.degree
+                y = co.icrs.dec.degree
+                # Account for potentially reversed x-limits in RA (degrees)
+                in_x_range = (x_min <= x <= x_max) if x_min < x_max else (x_max <= x <= x_min)
+            else:
+                # Plot directly in galactic coordinates
+                x = l
+                y = b
+                in_x_range = x_min <= x <= x_max
+
             # Only plot if within plot limits
-            if x_min <= l <= x_max and y_min <= b <= y_max:
-                scatter = ax.scatter(l, b, marker='*', s=5 * marker_scale, color='cyan')
+            if in_x_range and y_min <= y <= y_max:
+                # Discs: cyan markers, drawn above PMS using higher zorder.
+                scatter = ax.scatter(x, y, marker='*', s=5 * marker_scale,
+                                     color='cyan', zorder=3)
                 scatter_points.append(scatter)
-                labels_data.append((label, l, b))
+                # Use display_label for interactive annotations
+                labels_data.append((display_label, x, y))
+                disc_label_set.add(label)
                 if not interactive:
-                    # Scale label offset with font size
-                    offset = 0.02 * font_scale
-                    ax.text(l - offset, b, label, color='cyan', va='top', ha='right',
-                           fontsize=10 * font_scale)
+                    # Use shared helper to avoid overlapping labels
+                    self._place_non_overlapping_label(
+                        ax,
+                        x,
+                        y,
+                        label,
+                        font_scale,
+                        color='cyan',
+                        ha='right',
+                        offset_factor=0.02,
+                    )
+
+        # Remember which labels correspond to discs so that PMS labels
+        # for the same objects can be suppressed to avoid duplicates.
+        self._disc_label_set = disc_label_set
+
+        # For interactive labels, defer setting up the event handlers until
+        # PMS sources have also been added, so that there is a single shared
+        # annotation object for both discs and PMS.
+        if interactive and scatter_points:
+            pending = getattr(self, '_pending_interactive', {'scatter': [], 'labels': []})
+            pending['scatter'].extend(scatter_points)
+            pending['labels'].extend(labels_data)
+            self._pending_interactive = pending
 
         # Set up interactive label display
         if interactive and scatter_points:
@@ -505,7 +632,15 @@ class plotcloud:
             csvfile = data_utils.get_tau_sources_path()
 
         csvfile = os.path.expanduser(str(csvfile))
-        df = pd.read_csv(csvfile, usecols=['PMS', 'RA', 'Dec'])
+        df = pd.read_csv(csvfile)
+
+        # Ensure required columns exist
+        required_cols = {'PMS', 'RA', 'Dec'}
+        missing = required_cols.difference(df.columns)
+        if missing:
+            missing_str = ', '.join(sorted(missing))
+            raise ValueError(f"PMS CSV file is missing required columns: {missing_str}")
+
         nd = df.shape[0]
         print(f"got {nd} PMS sources")
 
@@ -533,12 +668,20 @@ class plotcloud:
         x_min, x_max = min(xlim), max(xlim)
         y_min, y_max = min(ylim), max(ylim)
 
-        # Store scatter points and labels for interactive mode
+        # Store scatter points and labels for interactive mode (PMS sources
+        # use white markers; interactive labels show the PMS name only).
         scatter_points = []
         labels_data = []
 
+        # If discs have been plotted, avoid duplicating labels for objects
+        # that are present in both the discs catalogue and the PMS catalogue.
+        disc_label_set = getattr(self, '_disc_label_set', set())
+
         for i in range(nd):
-            label, ra_str, dec_str = df.loc[i, :]
+            row = df.loc[i, :]
+            label = row['PMS']
+            ra_str = row['RA']
+            dec_str = row['Dec']
             co1 = SkyCoord(
                 [ra_str + dec_str],
                 frame='icrs',
@@ -555,77 +698,59 @@ class plotcloud:
                 # Only plot if within plot limits
                 if in_x_range and y_min <= dec1 <= y_max:
                     plot_label = _is_famous_label(label) if only_label_famous else True
+                    if label in disc_label_set:
+                        plot_label = False
 
-                    if plot_label:
-                        scatter = ax.scatter(ra1, dec1, marker='*', s=10 * marker_scale, color='cyan')
-                        if interactive:
-                            scatter_points.append(scatter)
-                            labels_data.append((label, ra1, dec1))
-                        if not interactive:
-                            # Check for position overlap
-                            # Scale label offset with font size
-                            offset_ra = 0.05 * font_scale
-                            ral = ra1 - offset_ra
-                            decl = dec1
-                            angle = 0.0
-                            # Scale overlap ranges with font size
-                            scaled_overlap_ra = self.overlap_range_ra * font_scale
-                            scaled_overlap = self.overlap_range * font_scale
-                            while (any(abs(ral - ra_prev) <= scaled_overlap_ra and
-                                      abs(decl - dec_prev) <= scaled_overlap
-                                      for ra_prev, dec_prev in self.prev_positions)):
-                                decl = decl + scaled_overlap
-
-                            ax.text(
-                                ral, decl, label,
-                                color='cyan', va='top', ha='left',
-                                size=10 * font_scale, clip_on=True, rotation=angle
-                            )
-                            self.prev_positions.append((ral, decl))
-                    else:
-                        ax.scatter(ra1, dec1, marker='*', s=10 * marker_scale, color='white')
+                    scatter = ax.scatter(ra1, dec1, marker='*', s=10 * marker_scale,
+                                         color='white', zorder=2)
+                    if interactive and plot_label:
+                        scatter_points.append(scatter)
+                        labels_data.append((label, ra1, dec1))
+                    if not interactive and plot_label:
+                        # Use shared helper to avoid overlapping static labels
+                        self._place_non_overlapping_label(ax,ra1,dec1,label,font_scale,color='cyan',
+                                                          ha='left',offset_factor=0.05)
             else:  # galactic
                 galactic_coords = co1.galactic
                 l, b = (galactic_coords.l.degree[0], galactic_coords.b.degree[0])
                 # Only plot if within plot limits
                 if x_min <= l <= x_max and y_min <= b <= y_max:
                     plot_label = _is_famous_label(label) if only_label_famous else True
+                    if label in disc_label_set:
+                        plot_label = False
 
-                    if plot_label:
-                        scatter = ax.scatter(l, b, marker='*', s=10 * marker_scale, color='cyan')
-                        if interactive:
-                            scatter_points.append(scatter)
-                            labels_data.append((label, l, b))
-                        if not interactive:
-                            # For galactic axes, treat l like RA and b like Dec
-                            offset_l = 0.05 * font_scale
-                            ll = l - offset_l
-                            bb = b
-                            angle = 0.0
-                            scaled_overlap_l = self.overlap_range_ra * font_scale
-                            scaled_overlap = self.overlap_range * font_scale
-                            while (any(abs(ll - l_prev) <= scaled_overlap_l and
-                                      abs(bb - b_prev) <= scaled_overlap
-                                      for l_prev, b_prev in self.prev_positions)):
-                                bb = bb + scaled_overlap
+                    scatter = ax.scatter(l, b, marker='*', s=10 * marker_scale,
+                                         color='white', zorder=2)
+                    if interactive and plot_label:
+                        scatter_points.append(scatter)
+                        labels_data.append((label, l, b))
+                    if not interactive and plot_label:
+                        # For galactic axes, treat l like RA and b like Dec
+                        self._place_non_overlapping_label(ax,l,b,label,font_scale,color='cyan',
+                                                          ha='left',offset_factor=0.05)
 
-                            ax.text(
-                                ll, bb, label,
-                                color='cyan', va='top', ha='left',
-                                size=10 * font_scale, clip_on=True, rotation=angle
-                            )
-                            self.prev_positions.append((ll, bb))
-                    else:
-                        ax.scatter(l, b, marker='*', s=10 * marker_scale, color='white')
-
-        # Set up interactive label display
-        if interactive and scatter_points:
-            scale = getattr(self, '_interactive_scale', 1.0)
-            self._setup_interactive_labels(ax, scatter_points, labels_data, scale_factor=scale)
+        # Set up interactive label display for discs+PMS together. Discs may have
+        # stored "pending" interactive points; combine them here so there is only
+        # one shared annotation object and event handler.
+        if interactive:
+            pending = getattr(self, '_pending_interactive', {'scatter': [], 'labels': []})
+            pending['scatter'].extend(scatter_points)
+            pending['labels'].extend(labels_data)
+            if pending['scatter']:
+                scale = getattr(self, '_interactive_scale', 1.0)
+                self._setup_interactive_labels(
+                    ax,
+                    pending['scatter'],
+                    pending['labels'],
+                    scale_factor=scale,
+                )
+            # Clear pending so subsequent plots start fresh
+            if hasattr(self, '_pending_interactive'):
+                del self._pending_interactive
 
     def plot(self, dustmap='planck', figsize=(15, 12), dpi=300,
              vmin=0.0, vmax=2.0, cmap=None, plot_discs=False,
-             plot_pms=True, pms_csvfile=None, discs_csvfile=None,
+             plot_pms=False, pms_csvfile=None, discs_csvfile=None,
              only_label_famous=False, bayestar_distance=None,
              save_path=None, interactive=False):
         """
@@ -818,9 +943,17 @@ class plotcloud:
         # Scale markers by the same factor as font size for interactive plots
         marker_scale = scale_factor**2 if interactive else 1.0
 
+        # Plot discs first (stored for interactive labels), then PMS so that
+        # discs can still be drawn above PMS via zorder and interactive labels
+        # are set up once for both.
         if plot_discs:
-            self.plot_all_discs(ax, csvfile=discs_csvfile, interactive=interactive,
-                               font_scale=scale_factor, marker_scale=marker_scale)
+            self.plot_all_discs(
+                ax,
+                csvfile=discs_csvfile,
+                interactive=interactive,
+                font_scale=scale_factor,
+                marker_scale=marker_scale,
+            )
 
         if plot_pms:
             self.plot_kenyon08_pms(
@@ -829,7 +962,7 @@ class plotcloud:
                 only_label_famous=only_label_famous,
                 interactive=interactive,
                 font_scale=scale_factor,
-                marker_scale=marker_scale
+                marker_scale=marker_scale,
             )
 
         # Set title with scaled padding and font size for interactive plots
