@@ -34,3 +34,23 @@ def get_discs_catalog_path() -> str:
     """
     return _resource_path("circumstellar-disk-catalog-with-gaiadr3.csv")
 
+
+def get_scocen_catalog_path() -> str:
+    """Return a filesystem path to the bundled Sco-Cen catalogue CSV.
+
+    By default this looks for ``Sco_Cen_all.csv`` inside the
+    ``discs_in_context/data`` directory. To use a different catalogue,
+    pass ``scocen_csvfile=...`` to ``plot()``.
+    """
+    return _resource_path("Sco_Cen_all.csv")
+
+
+def get_halpha_catalog_path() -> str:
+    """Return a filesystem path to the bundled Halpha sources catalogue CSV.
+
+    By default this looks for ``Delfini_strong_Halpha_subset.csv`` inside the
+    ``discs_in_context/data`` directory. To use a different catalogue,
+    pass ``halpha_csvfile=...`` to ``plot()``.
+    """
+    return _resource_path("Delfini_strong_Halpha_subset.csv")
+

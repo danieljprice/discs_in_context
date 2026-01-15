@@ -425,13 +425,29 @@ class plotcloud:
             if event.inaxes == ax:
                 vis = annot.get_visible()
                 found = False
-                for scatter in scatter_points:
+                # Check all scatter plots and collect matches with their indices
+                # Priority order: discs (index 0) > halpha (highest index) > scocen > pms
+                # Since scatter_points order is [discs, pms, scocen, halpha],
+                # discs=0, pms=1, scocen=2, halpha=3 (highest)
+                matches = []
+                for i, scatter in enumerate(scatter_points):
                     cont, ind = scatter.contains(event)
                     if cont:
                         idx = ind["ind"][0]
-                        update_annot(scatter, idx)
-                        found = True
-                        break
+                        matches.append((i, scatter, idx))
+                
+                if matches:
+                    # Priority: discs (0) > halpha (highest index) > others
+                    # Check for discs first
+                    disc_match = next((m for m in matches if m[0] == 0), None)
+                    if disc_match:
+                        _, scatter, idx = disc_match
+                    else:
+                        # No discs, so use highest index (halpha if present, else scocen)
+                        matches.sort(key=lambda x: x[0], reverse=True)
+                        _, scatter, idx = matches[0]
+                    update_annot(scatter, idx)
+                    found = True
 
                 if not found and vis:
                     annot.set_visible(False)
@@ -440,12 +456,22 @@ class plotcloud:
         def click(event):
             """Handle mouse click events."""
             if event.inaxes == ax:
-                for scatter in scatter_points:
+                # Same priority logic as hover: discs > halpha > scocen > pms
+                matches = []
+                for i, scatter in enumerate(scatter_points):
                     cont, ind = scatter.contains(event)
                     if cont:
                         idx = ind["ind"][0]
-                        update_annot(scatter, idx)
-                        break
+                        matches.append((i, scatter, idx))
+                
+                if matches:
+                    disc_match = next((m for m in matches if m[0] == 0), None)
+                    if disc_match:
+                        _, scatter, idx = disc_match
+                    else:
+                        matches.sort(key=lambda x: x[0], reverse=True)
+                        _, scatter, idx = matches[0]
+                    update_annot(scatter, idx)
 
         # Connect event handlers
         ax.figure.canvas.mpl_connect("motion_notify_event", hover)
@@ -730,11 +756,333 @@ class plotcloud:
             if hasattr(self, "_pending_interactive"):
                 del self._pending_interactive
 
+    def plot_scocen_sources(self, ax, csvfile=None, interactive=False,
+                            font_scale=1.0, marker_scale=1.0):
+        """
+        Plot Sco-Cen sources from a CSV catalogue (e.g. Sco_Cen_all.csv).
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes to plot on.
+        csvfile : str, optional
+            Path to CSV file with Sco-Cen source data. If None, looks for
+            'Sco_Cen_all.csv' in the current directory or in the user's
+            '~/Observations/dustmaps' directory.
+        interactive : bool, default False
+            If True, labels are shown on hover/click instead of always visible.
+        font_scale : float, default 1.0
+            Scale factor for font sizes.
+        marker_scale : float, default 1.0
+            Scale factor for marker sizes.
+        """
+        import os
+        import pandas as pd
+
+        if csvfile is None:
+            # Use the bundled Sco-Cen catalogue inside the package data dir
+            from . import data_utils
+
+            csvfile = data_utils.get_scocen_catalog_path()
+
+        csvfile = os.path.expanduser(str(csvfile))
+
+        # Read the CSV file produced from the VOTable query
+        try:
+            df = pd.read_csv(csvfile)
+            # Expect at least these columns (others are allowed but ignored here)
+            required_cols = {'_RAJ2000', '_DEJ2000', 'GaiaDR3'}
+            missing = required_cols.difference(df.columns)
+            if missing:
+                missing_str = ', '.join(sorted(missing))
+                raise ValueError(f"Sco-Cen CSV file is missing required columns: {missing_str}")
+
+            # Convert to numeric and filter out any rows without valid RA/Dec
+            df['_RAJ2000'] = pd.to_numeric(df['_RAJ2000'], errors='coerce')
+            df['_DEJ2000'] = pd.to_numeric(df['_DEJ2000'], errors='coerce')
+            df = df[df['_RAJ2000'].notna() & df['_DEJ2000'].notna()]
+        except Exception as e:
+            raise ValueError(f"Failed to read Sco-Cen CSV file: {e}")
+
+        # Check for distance column (optional, similar to plot_discs)
+        scocen_distance_col = None
+        for cand in ('Dist', 'distance_pc', 'dist_pc', 'distance', 'dist'):
+            if cand in df.columns:
+                scocen_distance_col = cand
+                break
+
+        nd = df.shape[0]
+        print(f"got {nd} scocen sources")
+
+        # Get plot limits
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x_min, x_max = min(xlim), max(xlim)
+        y_min, y_max = min(ylim), max(ylim)
+
+        # Store scatter points and labels for interactive mode
+        scatter_points = []
+        labels_data = []
+
+        # If discs have been plotted, avoid duplicating labels
+        disc_label_set = getattr(self, '_disc_label_set', set())
+
+        for i in range(nd):
+            row = df.loc[i, :]
+            ra_deg = row['_RAJ2000']
+            dec_deg = row['_DEJ2000']
+            # Format GaiaDR3 as integer to avoid scientific notation
+            if pd.notna(row['GaiaDR3']):
+                gaia_id = f"{int(row['GaiaDR3'])}"
+            else:
+                gaia_id = f"Source_{i}"
+            
+            # Build display label for interactive mode (optionally including distance)
+            if scocen_distance_col is not None:
+                dist_val = row[scocen_distance_col]
+                try:
+                    if np.isfinite(dist_val):
+                        display_label = f"{gaia_id} ({dist_val:.0f} pc)"
+                    else:
+                        display_label = gaia_id
+                except TypeError:
+                    display_label = gaia_id
+            else:
+                display_label = gaia_id
+            
+            # Create SkyCoord from decimal degrees
+            co1 = SkyCoord(
+                ra=ra_deg * units.deg,
+                dec=dec_deg * units.deg,
+                frame='icrs'
+            )
+
+            if self.coord_system == 'icrs':
+                ra1, dec1 = (co1.ra.degree, co1.dec.degree)
+                # Account for potentially reversed xlim
+                in_x_range = (x_min <= ra1 <= x_max) if x_min < x_max else (x_max <= ra1 <= x_min)
+                # Only plot if within plot limits
+                if in_x_range and y_min <= dec1 <= y_max:
+                    # Use Gaia ID as label, but don't label every source to avoid clutter
+                    # Only label if it's not in disc_label_set
+                    plot_label = gaia_id not in disc_label_set
+                    
+                    scatter = ax.scatter(ra1, dec1, marker='*', s=3 * marker_scale,
+                                         color='white', zorder=2)
+                    if interactive and plot_label:
+                        scatter_points.append(scatter)
+                        labels_data.append((display_label, ra1, dec1))
+                    # Don't plot static labels for all sources (too many)
+            else:  # galactic
+                galactic_coords = co1.galactic
+                l, b = (galactic_coords.l.degree, galactic_coords.b.degree)
+                # Only plot if within plot limits
+                if x_min <= l <= x_max and y_min <= b <= y_max:
+                    plot_label = gaia_id not in disc_label_set
+                    
+                    scatter = ax.scatter(l, b, marker='*', s=3 * marker_scale,
+                                         color='white', zorder=2)
+                    if interactive and plot_label:
+                        scatter_points.append(scatter)
+                        labels_data.append((display_label, l, b))
+                    # Don't plot static labels for all sources (too many)
+
+        # Set up interactive label display
+        # Extend existing pending list but don't set up labels yet - will be done in plot() after all sources
+        if interactive:
+            pending = getattr(self, "_pending_interactive", {"scatter": [], "labels": []})
+            pending["scatter"].extend(scatter_points)
+            pending["labels"].extend(labels_data)
+            # Store pending but don't set up labels yet - will be done in plot() after all sources
+            self._pending_interactive = pending
+
+    def plot_halpha_sources(self, ax, csvfile=None, interactive=False,
+                            font_scale=1.0, marker_scale=1.0):
+        """
+        Plot Halpha sources from a CSV catalogue (e.g. Delfini_strong_Halpha_subset.csv).
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes to plot on.
+        csvfile : str, optional
+            Path to CSV file with Halpha source data. If None, uses the bundled
+            catalogue in the package data directory.
+        interactive : bool, default False
+            If True, labels are shown on hover/click instead of always visible.
+        font_scale : float, default 1.0
+            Scale factor for font sizes.
+        marker_scale : float, default 1.0
+            Scale factor for marker sizes.
+        """
+        import os
+        import pandas as pd
+
+        if csvfile is None:
+            # Use the bundled Halpha catalogue inside the package data dir
+            from . import data_utils
+
+            csvfile = data_utils.get_halpha_catalog_path()
+
+        csvfile = os.path.expanduser(str(csvfile))
+
+        # Read the CSV file
+        try:
+            df = pd.read_csv(csvfile)
+            # Expect at least these columns
+            required_cols = {'RA_ICRS', 'DE_ICRS', 'GaiaDR3'}
+            missing = required_cols.difference(df.columns)
+            if missing:
+                missing_str = ', '.join(sorted(missing))
+                raise ValueError(f"Halpha CSV file is missing required columns: {missing_str}")
+
+            # Convert to numeric and filter out any rows without valid RA/Dec
+            df['RA_ICRS'] = pd.to_numeric(df['RA_ICRS'], errors='coerce')
+            df['DE_ICRS'] = pd.to_numeric(df['DE_ICRS'], errors='coerce')
+            df = df[df['RA_ICRS'].notna() & df['DE_ICRS'].notna()]
+        except Exception as e:
+            raise ValueError(f"Failed to read Halpha CSV file: {e}")
+
+        # Check for distance, mdot, and logLacc columns (optional)
+        distance_col = None
+        mdot_col = None
+        mdot_med_col = None
+        loglacc_col = None
+        for cand in ('rgeo', 'distance_pc', 'dist_pc', 'distance', 'dist'):
+            if cand in df.columns:
+                distance_col = cand
+                break
+        for cand in ('MaccCE', 'Macc', 'mdot', 'M_dot'):
+            if cand in df.columns:
+                mdot_col = cand
+                break
+        if 'MaccMed' in df.columns:
+            mdot_med_col = 'MaccMed'
+        if 'logLaccCE' in df.columns:
+            loglacc_col = 'logLaccCE'
+
+        nd = df.shape[0]
+        print(f"got {nd} Halpha sources")
+
+        # Get plot limits
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x_min, x_max = min(xlim), max(xlim)
+        y_min, y_max = min(ylim), max(ylim)
+
+        # Store scatter points and labels for interactive mode
+        scatter_points = []
+        labels_data = []
+
+        # If discs have been plotted, avoid duplicating labels
+        disc_label_set = getattr(self, '_disc_label_set', set())
+
+        for i in range(nd):
+            row = df.loc[i, :]
+            ra_deg = row['RA_ICRS']
+            dec_deg = row['DE_ICRS']
+            # Format GaiaDR3 as integer to avoid scientific notation
+            if pd.notna(row['GaiaDR3']):
+                gaia_id = f"{int(row['GaiaDR3'])}"
+            else:
+                gaia_id = f"Halpha_{i}"
+            
+            # Build display label with mdot, logLacc, and distance
+            label_parts = [gaia_id]
+            
+            # Get mdot value - use MaccCE if available, otherwise MaccMed (marked with *)
+            mdot_val = None
+            mdot_suffix = ""
+            if mdot_col is not None:
+                mdot_val = row[mdot_col]
+                if pd.isna(mdot_val) or not np.isfinite(mdot_val) or mdot_val <= 0:
+                    mdot_val = None
+            if mdot_val is None and mdot_med_col is not None:
+                mdot_val = row[mdot_med_col]
+                if pd.notna(mdot_val) and np.isfinite(mdot_val) and mdot_val > 0:
+                    mdot_suffix = "*"  # Indicate we're using MaccMed
+            
+            if mdot_val is not None:
+                try:
+                    if np.isfinite(mdot_val) and mdot_val > 0:
+                        # Format mdot in scientific notation
+                        label_parts.append(f"Mdot={mdot_val:.2e} M☉/yr{mdot_suffix}")
+                except (TypeError, ValueError):
+                    pass
+            
+            # Add logLaccCE if available
+            if loglacc_col is not None:
+                loglacc_val = row[loglacc_col]
+                try:
+                    if pd.notna(loglacc_val) and np.isfinite(loglacc_val):
+                        label_parts.append(f"logLacc={loglacc_val:.2f}")
+                except (TypeError, ValueError):
+                    pass
+            
+            if distance_col is not None:
+                dist_val = row[distance_col]
+                try:
+                    if np.isfinite(dist_val):
+                        label_parts.append(f"d={dist_val:.0f} pc")
+                except (TypeError, ValueError):
+                    pass
+            
+            display_label = " ".join(label_parts)
+            
+            # Create SkyCoord from decimal degrees
+            co1 = SkyCoord(
+                ra=ra_deg * units.deg,
+                dec=dec_deg * units.deg,
+                frame='icrs'
+            )
+
+            if self.coord_system == 'icrs':
+                ra1, dec1 = (co1.ra.degree, co1.dec.degree)
+                # Account for potentially reversed xlim
+                in_x_range = (x_min <= ra1 <= x_max) if x_min < x_max else (x_max <= ra1 <= x_min)
+                # Only plot if within plot limits
+                if in_x_range and y_min <= dec1 <= y_max:
+                    plot_label = gaia_id not in disc_label_set
+                    
+                    # Plot in red color
+                    scatter = ax.scatter(ra1, dec1, marker='*', s=3 * marker_scale,
+                                         color='red', zorder=2)
+                    if interactive and plot_label:
+                        scatter_points.append(scatter)
+                        labels_data.append((display_label, ra1, dec1))
+                    # Don't plot static labels for all sources (too many)
+            else:  # galactic
+                galactic_coords = co1.galactic
+                l, b = (galactic_coords.l.degree, galactic_coords.b.degree)
+                # Only plot if within plot limits
+                if x_min <= l <= x_max and y_min <= b <= y_max:
+                    plot_label = gaia_id not in disc_label_set
+                    
+                    # Plot in red color
+                    scatter = ax.scatter(l, b, marker='*', s=3 * marker_scale,
+                                         color='red', zorder=2)
+                    if interactive and plot_label:
+                        scatter_points.append(scatter)
+                        labels_data.append((display_label, l, b))
+                    # Don't plot static labels for all sources (too many)
+
+        # Set up interactive label display
+        # For Halpha, extend existing pending list (from scocen, pms, discs) but don't delete it
+        # so that all sources are in one list and priority logic works correctly
+        if interactive:
+            pending = getattr(self, "_pending_interactive", {"scatter": [], "labels": []})
+            pending["scatter"].extend(scatter_points)
+            pending["labels"].extend(labels_data)
+            # Store pending but don't set up labels yet - will be done in plot() after all sources
+            self._pending_interactive = pending
+
     def plot(self, dustmap='planck', figsize=(4, 3), dpi=300,
              vmin=0.0, vmax=2.0, cmap=None, plot_discs=False,
              plot_pms=False, pms_csvfile=None, discs_csvfile=None,
              only_label_famous=False, bayestar_distance=None,
-             show_regions=False, save_path=None, interactive=False):
+             show_regions=False, save_path=None, interactive=False,
+             plot_scocen=False, scocen_csvfile=None,
+             plot_halpha=False, halpha_csvfile=None):
         """
         Create the extinction map plot.
 
@@ -773,6 +1121,16 @@ class plotcloud:
         interactive : bool, default False
             If True, display the figure interactively. If False and
             save_path is provided, saves the figure.
+        plot_scocen : bool, default False
+            Whether to plot Sco-Cen sources from a CSV catalogue.
+        scocen_csvfile : str, optional
+            Path to Sco-Cen CSV file. If None, looks for 'Sco_Cen_all.csv'
+            in common locations.
+        plot_halpha : bool, default False
+            Whether to plot Halpha sources from a CSV catalogue.
+        halpha_csvfile : str, optional
+            Path to Halpha CSV file. If None, uses the bundled
+            'Delfini_strong_Halpha_subset.csv' in the package data directory.
 
         Returns
         -------
@@ -947,6 +1305,42 @@ class plotcloud:
                 font_scale=size_scale,
                 marker_scale=marker_scale,
             )
+
+        if plot_scocen:
+            self.size_scale = size_scale
+            self.plot_scocen_sources(
+                ax,
+                csvfile=scocen_csvfile,
+                interactive=interactive,
+                font_scale=size_scale,
+                marker_scale=marker_scale,
+            )
+
+        if plot_halpha:
+            self.size_scale = size_scale
+            self.plot_halpha_sources(
+                ax,
+                csvfile=halpha_csvfile,
+                interactive=interactive,
+                font_scale=size_scale,
+                marker_scale=marker_scale,
+            )
+
+        # Set up interactive labels for all sources combined (if interactive mode)
+        # This ensures priority logic works correctly: discs > halpha > scocen > pms
+        if interactive:
+            pending = getattr(self, "_pending_interactive", {"scatter": [], "labels": []})
+            if pending["scatter"]:
+                scale = getattr(self, "size_scale", 1.0)
+                self._setup_interactive_labels(
+                    ax,
+                    pending["scatter"],
+                    pending["labels"],
+                    scale_factor=scale,
+                )
+            # Clear pending after setting up labels
+            if hasattr(self, "_pending_interactive"):
+                del self._pending_interactive
 
         # Set title with a consistent, slightly larger font size
         ax.set_title(title, pad=4.0, fontsize=title_fontsize)
