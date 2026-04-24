@@ -278,6 +278,37 @@ class plotcloud:
             l, b = np.meshgrid(l, b)
             self.coords = SkyCoord(l * units.deg,b * units.deg,frame='galactic')
 
+    def _register_disc_object(self, label, l_deg, b_deg):
+        """Store a disc object position for cross-catalog label matching."""
+        if not hasattr(self, "_disc_objects"):
+            self._disc_objects = []
+        self._disc_objects.append(
+            {
+                "label": str(label),
+                "l": float(l_deg),
+                "b": float(b_deg),
+            }
+        )
+
+    def _match_disc_label_by_position(self, l_deg, b_deg, tol_deg=0.01):
+        """
+        Return nearest disc label to (l, b) within tolerance, or None.
+
+        A small coordinate tolerance allows cross-catalog matching even when
+        object names differ (e.g. common name vs Gaia source ID).
+        """
+        disc_objects = getattr(self, "_disc_objects", [])
+        if not disc_objects:
+            return None
+
+        dl = np.array([obj["l"] for obj in disc_objects], dtype=float) - float(l_deg)
+        db = np.array([obj["b"] for obj in disc_objects], dtype=float) - float(b_deg)
+        dist2 = dl * dl + db * db
+        idx = int(np.argmin(dist2))
+        if dist2[idx] <= tol_deg * tol_deg:
+            return disc_objects[idx]["label"]
+        return None
+
     def _place_non_overlapping_label(self, ax, x, y, label, font_scale,
                                      color='cyan', ha='left',
                                      offset_factor=0.05):
@@ -477,6 +508,39 @@ class plotcloud:
         ax.figure.canvas.mpl_connect("motion_notify_event", hover)
         ax.figure.canvas.mpl_connect("button_press_event", click)
 
+    def _merge_label_content(self, labels_data, coord_precision=3):
+        """
+        Merge interactive labels for coincident points across catalogues.
+
+        For each sky position (rounded), keep the "best" label content and
+        apply it to all entries at that position. This ensures one readable
+        label per object even when discs/Scocen/Halpha all contain it.
+        """
+        if not labels_data:
+            return labels_data
+
+        def _score(label):
+            score = len(label)
+            if "Mdot=" in label:
+                score += 100
+            if "logLacc=" in label or "Lacc=" in label:
+                score += 80
+            if "d=" in label or "pc" in label:
+                score += 40
+            return score
+
+        best_by_coord = {}
+        for label, x, y in labels_data:
+            key = (round(float(x), coord_precision), round(float(y), coord_precision))
+            if key not in best_by_coord or _score(label) > _score(best_by_coord[key]):
+                best_by_coord[key] = label
+
+        merged = []
+        for _, x, y in labels_data:
+            key = (round(float(x), coord_precision), round(float(y), coord_precision))
+            merged.append((best_by_coord[key], x, y))
+        return merged
+
     def plot_all_discs(self, ax, csvfile=None, interactive=False, font_scale=1.0, marker_scale=1.0):
         """
         Plot all protoplanetary discs from a CSV file.
@@ -528,6 +592,7 @@ class plotcloud:
         scatter_points = []
         labels_data = []
         disc_label_set = set()
+        self._disc_objects = []
 
         for i in range(nd):
             row = df.loc[i, :]
@@ -571,6 +636,7 @@ class plotcloud:
                 # Use display_label for interactive annotations
                 labels_data.append((display_label, x, y))
                 disc_label_set.add(label)
+                self._register_disc_object(label, l, b)
                 if not interactive:
                     # Use shared helper to avoid overlapping labels
                     self._place_non_overlapping_label(
@@ -597,17 +663,8 @@ class plotcloud:
             pending['labels'].extend(labels_data)
             self._pending_interactive = pending
 
-        # Set up interactive label display
-        if interactive and scatter_points:
-            # Use the same global size_scale (stored on self) so annotation
-            # text matches axis fonts. Default to 1.0 if not set.
-            scale = getattr(self, "size_scale", 1.0)
-            self._setup_interactive_labels(
-                ax,
-                scatter_points,
-                labels_data,
-                scale_factor=scale,
-            )
+        # Interactive labels are set up once in plot() after all catalogues
+        # are combined, so we only store pending points here.
 
     def plot_kenyon08_pms(self, ax, csvfile=None, only_label_famous=False,
                           interactive=False, font_scale=1.0, marker_scale=1.0):
@@ -744,17 +801,8 @@ class plotcloud:
             pending = getattr(self, "_pending_interactive", {"scatter": [], "labels": []})
             pending["scatter"].extend(scatter_points)
             pending["labels"].extend(labels_data)
-            if pending["scatter"]:
-                scale = getattr(self, "size_scale", 1.0)
-                self._setup_interactive_labels(
-                    ax,
-                    pending["scatter"],
-                    pending["labels"],
-                    scale_factor=scale,
-                )
-            # Clear pending so subsequent plots start fresh
-            if hasattr(self, "_pending_interactive"):
-                del self._pending_interactive
+            # Interactive labels are set up once in plot() after all
+            # catalogues are combined, so do not attach handlers here.
 
     def plot_scocen_sources(self, ax, csvfile=None, interactive=False,
                             font_scale=1.0, marker_scale=1.0):
@@ -824,9 +872,6 @@ class plotcloud:
         scatter_points = []
         labels_data = []
 
-        # If discs have been plotted, avoid duplicating labels
-        disc_label_set = getattr(self, '_disc_label_set', set())
-
         for i in range(nd):
             row = df.loc[i, :]
             ra_deg = row['_RAJ2000']
@@ -856,6 +901,9 @@ class plotcloud:
                 dec=dec_deg * units.deg,
                 frame='icrs'
             )
+            l_match = co1.galactic.l.degree
+            b_match = co1.galactic.b.degree
+            preferred_label = self._match_disc_label_by_position(l_match, b_match) or gaia_id
 
             if self.coord_system == 'icrs':
                 ra1, dec1 = (co1.ra.degree, co1.dec.degree)
@@ -863,28 +911,24 @@ class plotcloud:
                 in_x_range = (x_min <= ra1 <= x_max) if x_min < x_max else (x_max <= ra1 <= x_min)
                 # Only plot if within plot limits
                 if in_x_range and y_min <= dec1 <= y_max:
-                    # Use Gaia ID as label, but don't label every source to avoid clutter
-                    # Only label if it's not in disc_label_set
-                    plot_label = gaia_id not in disc_label_set
-                    
+                    plot_label = True
                     scatter = ax.scatter(ra1, dec1, marker='*', s=3 * marker_scale,
                                          color='white', zorder=2)
                     if interactive and plot_label:
                         scatter_points.append(scatter)
-                        labels_data.append((display_label, ra1, dec1))
+                        labels_data.append((f"{preferred_label} {display_label[len(gaia_id):]}".strip(), ra1, dec1))
                     # Don't plot static labels for all sources (too many)
             else:  # galactic
                 galactic_coords = co1.galactic
                 l, b = (galactic_coords.l.degree, galactic_coords.b.degree)
                 # Only plot if within plot limits
                 if x_min <= l <= x_max and y_min <= b <= y_max:
-                    plot_label = gaia_id not in disc_label_set
-                    
+                    plot_label = True
                     scatter = ax.scatter(l, b, marker='*', s=3 * marker_scale,
                                          color='white', zorder=2)
                     if interactive and plot_label:
                         scatter_points.append(scatter)
-                        labels_data.append((display_label, l, b))
+                        labels_data.append((f"{preferred_label} {display_label[len(gaia_id):]}".strip(), l, b))
                     # Don't plot static labels for all sources (too many)
 
         # Set up interactive label display
@@ -974,9 +1018,6 @@ class plotcloud:
         scatter_points = []
         labels_data = []
 
-        # If discs have been plotted, avoid duplicating labels
-        disc_label_set = getattr(self, '_disc_label_set', set())
-
         for i in range(nd):
             row = df.loc[i, :]
             ra_deg = row['RA_ICRS']
@@ -987,8 +1028,9 @@ class plotcloud:
             else:
                 gaia_id = f"Halpha_{i}"
             
-            # Build display label with mdot, logLacc, and distance
+            # Build display label with distance, mdot, and Lacc
             label_parts = [gaia_id]
+            metadata_parts = []
             
             # Get mdot value - use MaccCE if available, otherwise MaccMed (marked with *)
             mdot_val = None
@@ -1005,17 +1047,19 @@ class plotcloud:
             if mdot_val is not None:
                 try:
                     if np.isfinite(mdot_val) and mdot_val > 0:
-                        # Format mdot in scientific notation
-                        label_parts.append(f"Mdot={mdot_val:.2e} M☉/yr{mdot_suffix}")
+                        # Format mdot with two significant figures.
+                        metadata_parts.append(f"Mdot={mdot_val:.2g} M☉/yr{mdot_suffix}")
                 except (TypeError, ValueError):
                     pass
             
-            # Add logLaccCE if available
+            # Add accretion luminosity in linear units (Lsun), two significant figures.
             if loglacc_col is not None:
                 loglacc_val = row[loglacc_col]
                 try:
                     if pd.notna(loglacc_val) and np.isfinite(loglacc_val):
-                        label_parts.append(f"logLacc={loglacc_val:.2f}")
+                        lacc_val = 10.0 ** float(loglacc_val)
+                        if np.isfinite(lacc_val) and lacc_val > 0:
+                            metadata_parts.append(f"Lacc={lacc_val:.2g} L☉")
                 except (TypeError, ValueError):
                     pass
             
@@ -1023,9 +1067,11 @@ class plotcloud:
                 dist_val = row[distance_col]
                 try:
                     if np.isfinite(dist_val):
-                        label_parts.append(f"d={dist_val:.0f} pc")
+                        metadata_parts.insert(0, f"d={dist_val:.0f} pc")
                 except (TypeError, ValueError):
                     pass
+
+            label_parts.extend(metadata_parts)
             
             display_label = " ".join(label_parts)
             
@@ -1035,6 +1081,11 @@ class plotcloud:
                 dec=dec_deg * units.deg,
                 frame='icrs'
             )
+            l_match = co1.galactic.l.degree
+            b_match = co1.galactic.b.degree
+            preferred_label = self._match_disc_label_by_position(l_match, b_match) or gaia_id
+            metadata = " ".join(label_parts[1:])
+            merged_label = preferred_label if not metadata else f"{preferred_label} {metadata}"
 
             if self.coord_system == 'icrs':
                 ra1, dec1 = (co1.ra.degree, co1.dec.degree)
@@ -1042,28 +1093,26 @@ class plotcloud:
                 in_x_range = (x_min <= ra1 <= x_max) if x_min < x_max else (x_max <= ra1 <= x_min)
                 # Only plot if within plot limits
                 if in_x_range and y_min <= dec1 <= y_max:
-                    plot_label = gaia_id not in disc_label_set
-                    
+                    plot_label = True
                     # Plot in red color
                     scatter = ax.scatter(ra1, dec1, marker='*', s=3 * marker_scale,
                                          color='red', zorder=2)
                     if interactive and plot_label:
                         scatter_points.append(scatter)
-                        labels_data.append((display_label, ra1, dec1))
+                        labels_data.append((merged_label, ra1, dec1))
                     # Don't plot static labels for all sources (too many)
             else:  # galactic
                 galactic_coords = co1.galactic
                 l, b = (galactic_coords.l.degree, galactic_coords.b.degree)
                 # Only plot if within plot limits
                 if x_min <= l <= x_max and y_min <= b <= y_max:
-                    plot_label = gaia_id not in disc_label_set
-                    
+                    plot_label = True
                     # Plot in red color
                     scatter = ax.scatter(l, b, marker='*', s=3 * marker_scale,
                                          color='red', zorder=2)
                     if interactive and plot_label:
                         scatter_points.append(scatter)
-                        labels_data.append((display_label, l, b))
+                        labels_data.append((merged_label, l, b))
                     # Don't plot static labels for all sources (too many)
 
         # Set up interactive label display
@@ -1404,10 +1453,11 @@ class plotcloud:
             pending = getattr(self, "_pending_interactive", {"scatter": [], "labels": []})
             if pending["scatter"]:
                 scale = getattr(self, "size_scale", 1.0)
+                merged_labels = self._merge_label_content(pending["labels"])
                 self._setup_interactive_labels(
                     ax,
                     pending["scatter"],
-                    pending["labels"],
+                    merged_labels,
                     scale_factor=scale,
                 )
             # Clear pending after setting up labels
