@@ -92,8 +92,10 @@ plotter.plot(
     figsize=(18, 10),
     dpi=300,
     vmin=0.0,
-    vmax=2.0,
+    vmax=4.0,
     cmap='inferno',  # colormap name
+    colorbar=True,  # draw colour bar (default True)
+    stretch='linear',  # or 'sqrt' for a square-root stretch
     plot_discs=False,  # plot all discs from CSV
     plot_pms=True,  # plot PMS sources
     pms_csvfile='tau-sources.csv',  # custom PMS file

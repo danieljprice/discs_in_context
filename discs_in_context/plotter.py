@@ -1077,12 +1077,14 @@ class plotcloud:
             self._pending_interactive = pending
 
     def plot(self, dustmap='planck', figsize=(4, 3), dpi=300,
-             vmin=0.0, vmax=2.0, cmap=None, plot_discs=False,
+             vmin=0.0, vmax=4.0, cmap=None, plot_discs=False,
              plot_pms=False, pms_csvfile=None, discs_csvfile=None,
              only_label_famous=False, bayestar_distance=None,
              show_regions=False, save_path=None, interactive=False,
              plot_scocen=False, scocen_csvfile=None,
-             plot_halpha=False, halpha_csvfile=None):
+             plot_halpha=False, halpha_csvfile=None,
+             colorbar=True, colorbar_label=None, colorbar_kwargs=None,
+             stretch='linear', colorbar_stretch_labels=None, colorbar_av_ticks=None):
         """
         Create the extinction map plot.
 
@@ -1096,7 +1098,7 @@ class plotcloud:
             Figure resolution.
         vmin : float, default 0.0
             Minimum value for colormap.
-        vmax : float, default 2.0
+        vmax : float, default 4.0
             Maximum value for colormap.
         cmap : str, optional
             Colormap name. If None, uses 'binary'.
@@ -1131,6 +1133,25 @@ class plotcloud:
         halpha_csvfile : str, optional
             Path to Halpha CSV file. If None, uses the bundled
             'Delfini_strong_Halpha_subset.csv' in the package data directory.
+        colorbar : bool, default True
+            If True, draw a colour bar for the extinction map.
+        colorbar_label : str, optional
+            Label for the colour bar. If None, defaults based on ``stretch``.
+        colorbar_kwargs : dict, optional
+            Extra keyword arguments passed to ``fig.colorbar``.
+        stretch : str, default 'linear'
+            Intensity stretch applied to the displayed extinction map.
+            Supported values are:
+            - ``'linear'``: show \(A_V\) directly
+            - ``'sqrt'``: show \(\sqrt{A_V}\) (useful to compress dynamic range)
+        colorbar_stretch_labels : bool, default True
+            If True, show colour bar tick labels in \(A_V\) even when a
+            non-linear ``stretch`` is used. If None, defaults to True only
+            for ``stretch='sqrt'``.
+        colorbar_av_ticks : sequence of float, optional
+            Explicit tick values in \(A_V\) to show on the colour bar when
+            ``colorbar_stretch_labels=True``. If None, a small set of sensible
+            ticks is chosen based on the current vmin/vmax.
 
         Returns
         -------
@@ -1219,12 +1240,31 @@ class plotcloud:
         if cmap is None:
             cmap = 'binary'
 
+        stretch = str(stretch).lower()
+        if stretch not in ('linear', 'sqrt'):
+            raise ValueError("stretch must be one of: 'linear', 'sqrt'")
+
+        if colorbar_stretch_labels is None:
+            colorbar_stretch_labels = stretch == 'sqrt'
+
+        if stretch == 'sqrt':
+            av_clipped = np.clip(av, 0.0, None)
+            map_values = np.sqrt(av_clipped)
+            vmin_map = np.sqrt(max(0.0, float(vmin)))
+            vmax_map = np.sqrt(max(0.0, float(vmax)))
+            map_label_default = r"$\sqrt{A_V}$"
+        else:
+            map_values = av
+            vmin_map = vmin
+            vmax_map = vmax
+            map_label_default = r"$A_V$"
+
         # Plot extinction map
         if self.coord_system == 'icrs':
-            ax.imshow(
-                np.sqrt(av)[::, ::-1],
-                vmin=vmin,
-                vmax=vmax,
+            im = ax.imshow(
+                map_values[::, ::-1],
+                vmin=vmin_map,
+                vmax=vmax_map,
                 origin='lower',
                 interpolation='bilinear',
                 cmap=cmap,
@@ -1253,10 +1293,10 @@ class plotcloud:
             plt.grid(axis='x', color='0.3', linestyle='dashed', alpha=0.3, linewidth=0.3)
             plt.grid(axis='y', color='0.3', linestyle='dashed', alpha=0.3, linewidth=0.3)
         else:  # galactic
-            ax.imshow(
-                np.sqrt(av)[::, ::-1],
-                vmin=vmin,
-                vmax=vmax,
+            im = ax.imshow(
+                map_values[::, ::-1],
+                vmin=vmin_map,
+                vmax=vmax_map,
                 origin='lower',
                 interpolation='bilinear',
                 cmap=cmap,
@@ -1274,6 +1314,38 @@ class plotcloud:
             ax.set_xlabel('Galactic longitude', labelpad=labelpad)
             ax.set_ylabel('Galactic latitude', labelpad=labelpad)
             ax.set_aspect('equal')
+
+        if colorbar:
+            if colorbar_label is None:
+                if colorbar_stretch_labels:
+                    colorbar_label = r"$A_V$"
+                else:
+                    colorbar_label = map_label_default
+            if colorbar_kwargs is None:
+                colorbar_kwargs = {}
+            cbar = fig.colorbar(im, ax=ax, **colorbar_kwargs)
+            cbar.set_label(colorbar_label, fontsize=fontsize, labelpad=2.0)
+            if colorbar_stretch_labels:
+                if colorbar_av_ticks is None:
+                    default_ticks = np.array([0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0])
+                    av_min = max(0.0, float(vmin))
+                    av_max = max(0.0, float(vmax))
+                    ticks_av = default_ticks[(default_ticks >= av_min) & (default_ticks <= av_max)]
+                    if ticks_av.size == 0:
+                        ticks_av = np.array([av_min, av_max]) if av_max > av_min else np.array([av_min])
+                else:
+                    ticks_av = np.asarray(colorbar_av_ticks, dtype=float)
+
+                if stretch == 'sqrt':
+                    tick_locs = np.sqrt(np.clip(ticks_av, 0.0, None))
+                else:
+                    tick_locs = ticks_av
+                cbar.set_ticks(tick_locs)
+                cbar.set_ticklabels([f"{t:g}" for t in ticks_av])
+
+            cbar.ax.tick_params(labelsize=fontsize, width=tick_width, length=tick_length, pad=1.0)
+            for spine in cbar.ax.spines.values():
+                spine.set_linewidth(tick_width)
 
         # Optionally overlay preset region boundaries (for all-sky maps)
         if show_regions and self.region == 'allsky':
