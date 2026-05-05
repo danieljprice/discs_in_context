@@ -31,12 +31,16 @@ This package requires the following dependencies (automatically installed with t
 
 ### Downloading Dust Maps
 
-After installing, you'll need to download the dust map data using the `dustmaps` command-line tools:
+After installing, you'll need to download the dust map data using a short python script:
 
-```bash
-dustmaps_download planck
-dustmaps_download sfd
-dustmaps_download bayestar
+```python
+from dustmaps.planck import fetch as fp
+from dustmaps.sfd import fetch as fs
+from dustmaps.bayestar import fetch as fb
+
+fp()
+fs()
+fb()
 ```
 
 ## Usage
