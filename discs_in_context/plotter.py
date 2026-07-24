@@ -58,7 +58,8 @@ class plotcloud:
         object : str, optional
             Object name to look up in the discs CSV file (e.g., 'HD 142527').
             If provided, initializes the map centred on this object using
-            coordinates from the discs catalogue.
+            catalogue coordinates when available, otherwise via Sesame
+            name resolve. Non-catalogue targets are marked with an X.
         csvfile : str, optional
             Path to discs CSV file. If None, uses the copy bundled in the
             package data directory.
@@ -79,6 +80,11 @@ class plotcloud:
         self.overlap_range = 0.25
         self.overlap_range_ra = 0.2
         self.region = region  # Store region name for title
+        # Target object (set by _init_from_object when object= is used)
+        self.object = None
+        self.object_from_catalog = False
+        self.object_l = None
+        self.object_b = None
 
         # Initialize coordinates based on input
         if region is not None:
@@ -166,10 +172,14 @@ class plotcloud:
         """
         Initialize from an object name looked up in a CSV file.
 
+        If the name is not in the discs catalogue, fall back to a Sesame
+        name resolve (Simbad / NED / VizieR via Astropy).
+
         Parameters
         ----------
         object : str
-            Object name to search for in the CSV file (e.g., 'HD 142527').
+            Object name to search for in the CSV file (e.g., 'HD 142527'),
+            or any Sesame-resolvable name if absent from the catalogue.
         csvfile : str or None
             Path to CSV file containing disc data. If None, uses the
             bundled discs catalogue in the package data directory.
@@ -179,8 +189,10 @@ class plotcloud:
             Unit for image_size: 'arcsec' or 'degrees'.
         """
         import os
+        import warnings
         import pandas as pd
         from astropy.coordinates import SkyCoord
+        from astropy.coordinates.name_resolve import NameResolveError
         import astropy.units as u
 
         # If no CSV path is provided, use the bundled discs catalogue
@@ -198,22 +210,39 @@ class plotcloud:
                 "Discs CSV file must contain columns: 'target_id', 'l', 'b'"
             ) from exc
 
-        # Find the object
+        # Prefer catalogue coordinates; otherwise resolve the name via Sesame
         matches = df[df['target_id'] == object]
-        if len(matches) == 0:
-            raise ValueError(f"Object '{object}' not found in CSV file '{csvfile}'")
-        if len(matches) > 1:
-            import warnings
-
+        if len(matches) > 0:
+            if len(matches) > 1:
+                warnings.warn(
+                    f"Multiple entries found for object '{object}' in CSV file; "
+                    "using the first match.",
+                    RuntimeWarning,
+                )
+            l = float(matches.iloc[0]['l'])
+            b = float(matches.iloc[0]['b'])
+            self.object_from_catalog = True
+        else:
+            try:
+                resolved = SkyCoord.from_name(object)
+            except NameResolveError as exc:
+                raise ValueError(
+                    f"Object '{object}' not found in discs catalogue '{csvfile}' "
+                    "and Sesame name resolve also failed."
+                ) from exc
+            gal = resolved.galactic
+            l = float(gal.l.deg)
+            b = float(gal.b.deg)
+            self.object_from_catalog = False
             warnings.warn(
-                f"Multiple entries found for object '{object}' in CSV file; "
-                "using the first match.",
+                f"Object '{object}' not in discs catalogue; "
+                f"centred on Sesame position (l={l:.4f}, b={b:.4f}).",
                 RuntimeWarning,
             )
 
-        # Get coordinates
-        l = matches.iloc[0]['l']
-        b = matches.iloc[0]['b']
+        # Remember centre for an optional target marker on the plot
+        self.object_l = l
+        self.object_b = b
 
         # Convert image size to degrees
         if image_size_unit == 'arcsec':
@@ -255,7 +284,7 @@ class plotcloud:
             self.dec_span = self.dec_max - self.dec_min
             self.max_span = max(self.ra_span, self.dec_span / 15.0)
 
-        # Store object name for title
+        # Store object name for title / hover label
         self.object = object
 
     def _generate_coord_grid(self):
@@ -289,6 +318,49 @@ class plotcloud:
                 "b": float(b_deg),
             }
         )
+
+    def _plot_target_marker(self, ax, interactive=False, marker_scale=1.0):
+        """
+        Mark a Sesame-resolved target (not in the discs catalogue) with an X.
+
+        In interactive mode the object name is shown on hover via the shared
+        annotation machinery.
+        """
+        if self.object is None or self.object_from_catalog:
+            return
+        if self.object_l is None or self.object_b is None:
+            return
+
+        # Convert stored galactic centre to the plot coordinate system
+        if self.coord_system == 'icrs':
+            co = SkyCoord(
+                self.object_l * units.deg,
+                self.object_b * units.deg,
+                frame='galactic',
+            )
+            x = co.icrs.ra.degree
+            y = co.icrs.dec.degree
+        else:
+            x = self.object_l
+            y = self.object_b
+
+        # Cyan X above other source markers; larger pick radius for hover
+        scatter = ax.scatter(
+            x, y,
+            marker='x',
+            s=40 * marker_scale,
+            color='cyan',
+            linewidths=1.0,
+            zorder=20,
+        )
+        scatter.set_picker(True)
+        scatter.set_pickradius(8)
+
+        if interactive:
+            pending = getattr(self, "_pending_interactive", {"scatter": [], "labels": []})
+            pending["scatter"].append(scatter)
+            pending["labels"].append((self.object, x, y))
+            self._pending_interactive = pending
 
     def _match_disc_label_by_position(self, l_deg, b_deg, tol_deg=0.01):
         """
@@ -361,8 +433,9 @@ class plotcloud:
             va='top',
             ha=ha,
             size=10 * font_scale,
-            clip_on=True,
+            clip_on=False,
             rotation=0.0,
+            zorder=10000,
         )
         self.prev_positions.append((label_x, label_y))
 
@@ -428,6 +501,8 @@ class plotcloud:
                            arrowprops=dict(arrowstyle="->", linewidth=0.5 * scale_factor),
                            fontsize=10 * scale_factor)
         annot.set_visible(False)
+        annot.set_zorder(10000)
+        annot.set_clip_on(False)
 
         # Create a mapping from scatter plot to label indices
         scatter_to_labels = {}
@@ -1028,9 +1103,11 @@ class plotcloud:
             else:
                 gaia_id = f"Halpha_{i}"
             
-            # Build display label with distance, mdot, and Lacc
+            # Build display label with distance first, and Mdot/Lacc on line 2.
             label_parts = [gaia_id]
-            metadata_parts = []
+            distance_str = None
+            mdot_str = None
+            lacc_str = None
             
             # Get mdot value - use MaccCE if available, otherwise MaccMed (marked with *)
             mdot_val = None
@@ -1048,7 +1125,7 @@ class plotcloud:
                 try:
                     if np.isfinite(mdot_val) and mdot_val > 0:
                         # Format mdot with two significant figures.
-                        metadata_parts.append(f"Mdot={mdot_val:.2g} M☉/yr{mdot_suffix}")
+                        mdot_str = f"Mdot={mdot_val:.2g} M☉/yr{mdot_suffix}"
                 except (TypeError, ValueError):
                     pass
             
@@ -1059,7 +1136,7 @@ class plotcloud:
                     if pd.notna(loglacc_val) and np.isfinite(loglacc_val):
                         lacc_val = 10.0 ** float(loglacc_val)
                         if np.isfinite(lacc_val) and lacc_val > 0:
-                            metadata_parts.append(f"Lacc={lacc_val:.2g} L☉")
+                            lacc_str = f"Lacc={lacc_val:.2g} L☉"
                 except (TypeError, ValueError):
                     pass
             
@@ -1067,11 +1144,24 @@ class plotcloud:
                 dist_val = row[distance_col]
                 try:
                     if np.isfinite(dist_val):
-                        metadata_parts.insert(0, f"d={dist_val:.0f} pc")
+                        distance_str = f"d={dist_val:.0f} pc"
                 except (TypeError, ValueError):
                     pass
 
-            label_parts.extend(metadata_parts)
+            marker_size_scale = 1.0
+            if distance_str is not None:
+                label_parts.append(distance_str)
+                # Scale marker size approximately as distance / 140 pc,
+                # with clipping to avoid vanishingly small or huge symbols.
+                try:
+                    dist_numeric = float(dist_val)
+                    if np.isfinite(dist_numeric) and dist_numeric > 0.0:
+                        marker_size_scale = np.clip(140.0 / dist_numeric, 0.5, 2.0)
+                except (TypeError, ValueError):
+                    pass
+            line2_parts = [p for p in (mdot_str, lacc_str) if p]
+            if line2_parts:
+                label_parts.append("\n" + " ".join(line2_parts))
             
             display_label = " ".join(label_parts)
             
@@ -1084,8 +1174,21 @@ class plotcloud:
             l_match = co1.galactic.l.degree
             b_match = co1.galactic.b.degree
             preferred_label = self._match_disc_label_by_position(l_match, b_match) or gaia_id
-            metadata = " ".join(label_parts[1:])
+            metadata = " ".join(label_parts[1:]).strip()
             merged_label = preferred_label if not metadata else f"{preferred_label} {metadata}"
+
+            # Set red marker opacity from Mdot:
+            # alpha=1.0 at 1e-7 Msun/yr, then decreases linearly with log10(Mdot).
+            marker_alpha = 0.35
+            if mdot_val is not None:
+                try:
+                    if np.isfinite(mdot_val) and mdot_val > 0:
+                        log_mdot = np.log10(float(mdot_val))
+                        norm = (log_mdot - np.log10(1e-10)) / (np.log10(1e-7) - np.log10(1e-10))
+                        norm = float(np.clip(norm, 0.0, 1.0))
+                        marker_alpha = 0.15 + 0.85 * norm
+                except (TypeError, ValueError):
+                    pass
 
             if self.coord_system == 'icrs':
                 ra1, dec1 = (co1.ra.degree, co1.dec.degree)
@@ -1094,9 +1197,9 @@ class plotcloud:
                 # Only plot if within plot limits
                 if in_x_range and y_min <= dec1 <= y_max:
                     plot_label = True
-                    # Plot in red color
-                    scatter = ax.scatter(ra1, dec1, marker='*', s=3 * marker_scale,
-                                         color='red', zorder=2)
+                    # Plot in red color; scale marker size with distance / 140 pc.
+                    scatter = ax.scatter(ra1, dec1, marker='*', s=3 * marker_scale * marker_size_scale,
+                                         color='red', alpha=marker_alpha, zorder=2)
                     if interactive and plot_label:
                         scatter_points.append(scatter)
                         labels_data.append((merged_label, ra1, dec1))
@@ -1107,9 +1210,9 @@ class plotcloud:
                 # Only plot if within plot limits
                 if x_min <= l <= x_max and y_min <= b <= y_max:
                     plot_label = True
-                    # Plot in red color
-                    scatter = ax.scatter(l, b, marker='*', s=3 * marker_scale,
-                                         color='red', zorder=2)
+                    # Plot in red color; scale marker size with distance / 140 pc.
+                    scatter = ax.scatter(l, b, marker='*', s=3 * marker_scale * marker_size_scale,
+                                         color='red', alpha=marker_alpha, zorder=2)
                     if interactive and plot_label:
                         scatter_points.append(scatter)
                         labels_data.append((merged_label, l, b))
@@ -1373,6 +1476,7 @@ class plotcloud:
             if colorbar_kwargs is None:
                 colorbar_kwargs = {}
             cbar = fig.colorbar(im, ax=ax, **colorbar_kwargs)
+            cbar.ax.set_zorder(0)
             cbar.set_label(colorbar_label, fontsize=fontsize, labelpad=2.0)
             if colorbar_stretch_labels:
                 if colorbar_av_ticks is None:
@@ -1446,6 +1550,11 @@ class plotcloud:
                 font_scale=size_scale,
                 marker_scale=marker_scale,
             )
+
+        # X marker for Sesame-resolved targets not in the discs catalogue
+        self._plot_target_marker(
+            ax, interactive=interactive, marker_scale=marker_scale,
+        )
 
         # Set up interactive labels for all sources combined (if interactive mode)
         # This ensures priority logic works correctly: discs > halpha > scocen > pms
