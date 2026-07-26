@@ -1236,14 +1236,22 @@ class plotcloud:
              plot_scocen=False, scocen_csvfile=None,
              plot_halpha=False, halpha_csvfile=None,
              colorbar=True, colorbar_label=None, colorbar_kwargs=None,
-             stretch='linear', colorbar_stretch_labels=None, colorbar_av_ticks=None):
+             stretch=None, colorbar_stretch_labels=None, colorbar_av_ticks=None,
+             herschel_fits=None, herschel_band='psw', herschel_cache_dir=None,
+             herschel_hips_id=None):
         """
         Create the extinction map plot.
 
         Parameters
         ----------
         dustmap : str, default 'planck'
-            Dust map to use: 'planck', 'sfd', or 'bayestar'.
+            Dust map to use: 'planck', 'sfd', 'bayestar', 'herschel', or
+            'herschel_hips'.
+            ``herschel`` uses pointed SPIRE maps (ESASky download/cache or
+            ``herschel_fits``).
+            ``herschel_hips`` uses ESA SPIRE HiPS cutouts via hips2fits
+            (visualisation mosaic; lower fidelity than pointed maps).
+            Herschel values are surface brightness in MJy/sr.
         figsize : tuple, default (18, 10)
             Figure size in inches.
         dpi : int, default 300
@@ -1253,7 +1261,8 @@ class plotcloud:
         vmax : float, default 4.0
             Maximum value for colormap.
         cmap : str, optional
-            Colormap name. If None, uses 'binary'.
+            Colormap name. If None, uses 'binary' for extinction maps and
+            'inferno' for Herschel.
         plot_discs : bool, default False
             Whether to plot all discs.
         plot_pms : bool, default True
@@ -1291,19 +1300,28 @@ class plotcloud:
             Label for the colour bar. If None, defaults based on ``stretch``.
         colorbar_kwargs : dict, optional
             Extra keyword arguments passed to ``fig.colorbar``.
-        stretch : str, default 'linear'
-            Intensity stretch applied to the displayed extinction map.
-            Supported values are:
-            - ``'linear'``: show \(A_V\) directly
-            - ``'sqrt'``: show \(\sqrt{A_V}\) (useful to compress dynamic range)
+        stretch : str, optional
+            Intensity stretch: 'linear', 'sqrt', or 'log'. If None, uses
+            'log' for Herschel and 'linear' for extinction maps.
         colorbar_stretch_labels : bool, default True
             If True, show colour bar tick labels in \(A_V\) even when a
             non-linear ``stretch`` is used. If None, defaults to True only
-            for ``stretch='sqrt'``.
+            for ``stretch='sqrt'``. Ignored for Herschel (MJy/sr labels).
         colorbar_av_ticks : sequence of float, optional
             Explicit tick values in \(A_V\) to show on the colour bar when
             ``colorbar_stretch_labels=True``. If None, a small set of sensible
             ticks is chosen based on the current vmin/vmax.
+        herschel_fits : str, optional
+            Path to a local SPIRE FITS file. If None and ``dustmap='herschel'``,
+            download via ESASky into ``herschel_cache_dir``.
+        herschel_band : str, default 'psw'
+            SPIRE band for Herschel backends: 'psw' (250 um), 'pmw' (350),
+            'plw' (500).
+        herschel_cache_dir : str, optional
+            Cache directory for ESASky SPIRE downloads (``dustmap='herschel'``).
+        herschel_hips_id : str, optional
+            Override HiPS survey id for ``dustmap='herschel_hips'``
+            (default ``ESAVO/P/HERSCHEL/SPIRE-250`` etc. from band).
 
         Returns
         -------
@@ -1312,7 +1330,15 @@ class plotcloud:
         ax : matplotlib.axes.Axes
             The axes object.
         """
-        # Get extinction map
+        is_herschel = dustmap in ('herschel', 'herschel_hips')
+
+        # Auto stretch: log for Herschel intensity, linear for Av maps
+        if stretch is None:
+            stretch = 'log' if is_herschel else 'linear'
+        stretch = str(stretch).lower()
+
+        # Get background map
+        herschel_bunit = 'MJy/sr'
         if dustmap == 'planck':
             planck = PlanckQuery()
             av = 3.1 * planck(self.coords)
@@ -1357,11 +1383,46 @@ class plotcloud:
 
             av = 2.742 * ebv
             dustmap_name = 'Bayestar'
+        elif dustmap == 'herschel':
+            from .herschel import herschel_on_grid
+
+            # Prefer object name for ESASky query when available
+            position = self.object
+            av, herschel_bunit = herschel_on_grid(
+                self.coords,
+                fits_path=herschel_fits,
+                position=position,
+                band=herschel_band,
+                cache_dir=herschel_cache_dir,
+            )
+            band_um = {'psw': '250', 'pmw': '350', 'plw': '500'}.get(
+                str(herschel_band).lower(), str(herschel_band)
+            )
+            dustmap_name = f'Herschel SPIRE {band_um}'
+        elif dustmap == 'herschel_hips':
+            from .herschel import herschel_hips_on_grid
+
+            av, herschel_bunit = herschel_hips_on_grid(
+                self.coords,
+                band=herschel_band,
+                hips_id=herschel_hips_id,
+            )
+            band_um = {'psw': '250', 'pmw': '350', 'plw': '500'}.get(
+                str(herschel_band).lower(), str(herschel_band)
+            )
+            dustmap_name = f'Herschel SPIRE {band_um} HiPS'
         else:
             raise ValueError(f"Unknown dustmap: {dustmap}")
 
-        # Format title: include region name if using a preset region
-        if self.region is not None and self.region != 'allsky':
+        # Format title
+        if is_herschel:
+            if self.object is not None:
+                title = f'{dustmap_name} — {self.object}'
+            elif self.region is not None and self.region != 'allsky':
+                title = f'{dustmap_name} map of {self.region.capitalize()}'
+            else:
+                title = f'{dustmap_name} map'
+        elif self.region is not None and self.region != 'allsky':
             region_name = self.region.capitalize()
             title = f'{dustmap_name} extinction map of {region_name}'
         else:
@@ -1390,43 +1451,58 @@ class plotcloud:
 
         # Set colormap
         if cmap is None:
-            cmap = 'binary'
+            cmap = 'inferno' if is_herschel else 'binary'
 
-        stretch = str(stretch).lower()
-        if stretch not in ('linear', 'sqrt'):
-            raise ValueError("stretch must be one of: 'linear', 'sqrt'")
+        if stretch not in ('linear', 'sqrt', 'log'):
+            raise ValueError("stretch must be one of: 'linear', 'sqrt', 'log'")
 
         if colorbar_stretch_labels is None:
-            colorbar_stretch_labels = stretch == 'sqrt'
+            colorbar_stretch_labels = (stretch == 'sqrt') and (not is_herschel)
 
+        # Build display array and color limits / norm
+        imshow_kw = dict(
+            origin='lower',
+            interpolation='bilinear',
+            cmap=cmap,
+            aspect='equal',
+        )
         if stretch == 'sqrt':
             av_clipped = np.clip(av, 0.0, None)
             map_values = np.sqrt(av_clipped)
-            vmin_map = np.sqrt(max(0.0, float(vmin)))
-            vmax_map = np.sqrt(max(0.0, float(vmax)))
-            map_label_default = r"$\sqrt{A_V}$"
+            imshow_kw['vmin'] = np.sqrt(max(0.0, float(vmin)))
+            imshow_kw['vmax'] = np.sqrt(max(0.0, float(vmax)))
+            map_label_default = (
+                rf"$\sqrt{{\mathrm{{{herschel_bunit}}}}}$" if is_herschel
+                else r"$\sqrt{A_V}$"
+            )
+        elif stretch == 'log':
+            from matplotlib.colors import LogNorm
+
+            # LogNorm requires positive finite limits and data
+            vmin_pos = max(float(vmin), 1e-6) if float(vmin) > 0 else 1e-6
+            vmax_pos = max(float(vmax), vmin_pos * 10.0)
+            map_values = np.array(av, dtype=float)
+            map_values = np.where(np.isfinite(map_values), map_values, np.nan)
+            map_values = np.where(map_values > 0, map_values, np.nan)
+            imshow_kw['norm'] = LogNorm(vmin=vmin_pos, vmax=vmax_pos)
+            map_label_default = herschel_bunit if is_herschel else r"$A_V$"
         else:
             map_values = av
-            vmin_map = vmin
-            vmax_map = vmax
-            map_label_default = r"$A_V$"
+            imshow_kw['vmin'] = vmin
+            imshow_kw['vmax'] = vmax
+            map_label_default = herschel_bunit if is_herschel else r"$A_V$"
 
-        # Plot extinction map
+        # Plot background map
         if self.coord_system == 'icrs':
             im = ax.imshow(
                 map_values[::, ::-1],
-                vmin=vmin_map,
-                vmax=vmax_map,
-                origin='lower',
-                interpolation='bilinear',
-                cmap=cmap,
-                aspect='equal',
                 extent=[
                     self.ra_max * 15.0,
                     self.ra_min * 15.0,
                     self.dec_min,
                     self.dec_max
                 ],
+                **imshow_kw,
             )
             ax.set_xlim(self.ra_max * 15.0, self.ra_min * 15.0)
             ax.set_ylim(self.dec_min, self.dec_max)
@@ -1447,18 +1523,13 @@ class plotcloud:
         else:  # galactic
             im = ax.imshow(
                 map_values[::, ::-1],
-                vmin=vmin_map,
-                vmax=vmax_map,
-                origin='lower',
-                interpolation='bilinear',
-                cmap=cmap,
-                aspect='equal',
                 extent=[
                     self.l_max,
                     self.l_min,
                     self.b_min,
                     self.b_max
-                ]
+                ],
+                **imshow_kw,
             )
             ax.set_xlim(self.l_min, self.l_max)
             ax.set_ylim(self.b_min, self.b_max)
@@ -1469,7 +1540,9 @@ class plotcloud:
 
         if colorbar:
             if colorbar_label is None:
-                if colorbar_stretch_labels:
+                if is_herschel:
+                    colorbar_label = map_label_default
+                elif colorbar_stretch_labels:
                     colorbar_label = r"$A_V$"
                 else:
                     colorbar_label = map_label_default
@@ -1478,7 +1551,7 @@ class plotcloud:
             cbar = fig.colorbar(im, ax=ax, **colorbar_kwargs)
             cbar.ax.set_zorder(0)
             cbar.set_label(colorbar_label, fontsize=fontsize, labelpad=2.0)
-            if colorbar_stretch_labels:
+            if colorbar_stretch_labels and (not is_herschel):
                 if colorbar_av_ticks is None:
                     default_ticks = np.array([0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0])
                     av_min = max(0.0, float(vmin))

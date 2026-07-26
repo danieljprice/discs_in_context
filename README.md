@@ -28,6 +28,9 @@ This package requires the following dependencies (automatically installed with t
 - astropy
 - dustmaps (with Planck, SFD, and/or Bayestar maps downloaded)
 - pandas
+- reproject (for ``dustmap='herschel'``; SciPy fallback if missing)
+- astroquery (ESASky SPIRE download for Herschel)
+- scipy
 
 ### Downloading Dust Maps
 
@@ -92,20 +95,57 @@ The `plot()` method accepts many customization options:
 
 ```python
 plotter.plot(
-    dustmap='planck',  # or 'sfd', 'bayestar'
+    dustmap='planck',  # or 'sfd', 'bayestar', 'herschel', 'herschel_hips'
     figsize=(18, 10),
     dpi=300,
     vmin=0.0,
     vmax=4.0,
     cmap='inferno',  # colormap name
     colorbar=True,  # draw colour bar (default True)
-    stretch='linear',  # or 'sqrt' for a square-root stretch
+    stretch='linear',  # or 'sqrt' / 'log' (Herschel defaults to log)
     plot_discs=False,  # plot all discs from CSV
     plot_pms=True,  # plot PMS sources
     pms_csvfile='tau-sources.csv',  # custom PMS file
     discs_csvfile='discs.csv',  # custom discs file
     save_path='output.pdf',
     show=False  # display interactively
+)
+```
+
+### Herschel SPIRE background
+
+**Pointed maps** (`dustmap='herschel'`): science-grade Level-2 SPIRE via ESASky (or a local FITS path).
+
+```python
+obs = pc(
+    object='IRAS 18148-0440',
+    image_size=1.0,
+    image_size_unit='degrees',
+    coord_system='icrs',
+)
+obs.plot(
+    dustmap='herschel',
+    herschel_band='psw',          # 250 um; or 'pmw' / 'plw'
+    herschel_cache_dir='herschel_l483',  # optional cache path
+    # herschel_fits='path/to/spire.fits.gz',  # skip download
+    vmin=60,
+    vmax=4000,
+    interactive=True,
+    plot_discs=True,
+    plot_halpha=True,
+)
+```
+
+**HiPS mosaic** (`dustmap='herschel_hips'`): ESA all-observed-sky SPIRE HiPS cutout via hips2fits. Convenient anywhere Herschel looked; lower fidelity than pointed downloads.
+
+```python
+obs.plot(
+    dustmap='herschel_hips',
+    herschel_band='psw',
+    vmin=60,
+    vmax=4000,
+    interactive=True,
+    plot_discs=True,
 )
 ```
 
