@@ -541,7 +541,7 @@ class plotcloud:
                     if cont:
                         idx = ind["ind"][0]
                         matches.append((i, scatter, idx))
-                
+
                 if matches:
                     # Priority: discs (0) > halpha (highest index) > others
                     # Check for discs first
@@ -569,7 +569,7 @@ class plotcloud:
                     if cont:
                         idx = ind["ind"][0]
                         matches.append((i, scatter, idx))
-                
+
                 if matches:
                     disc_match = next((m for m in matches if m[0] == 0), None)
                     if disc_match:
@@ -956,7 +956,7 @@ class plotcloud:
                 gaia_id = f"{int(row['GaiaDR3'])}"
             else:
                 gaia_id = f"Source_{i}"
-            
+
             # Build display label for interactive mode (optionally including distance)
             if scocen_distance_col is not None:
                 dist_val = row[scocen_distance_col]
@@ -969,7 +969,7 @@ class plotcloud:
                     display_label = gaia_id
             else:
                 display_label = gaia_id
-            
+
             # Create SkyCoord from decimal degrees
             co1 = SkyCoord(
                 ra=ra_deg * units.deg,
@@ -1102,13 +1102,13 @@ class plotcloud:
                 gaia_id = f"{int(row['GaiaDR3'])}"
             else:
                 gaia_id = f"Halpha_{i}"
-            
+
             # Build display label with distance first, and Mdot/Lacc on line 2.
             label_parts = [gaia_id]
             distance_str = None
             mdot_str = None
             lacc_str = None
-            
+
             # Get mdot value - use MaccCE if available, otherwise MaccMed (marked with *)
             mdot_val = None
             mdot_suffix = ""
@@ -1120,7 +1120,7 @@ class plotcloud:
                 mdot_val = row[mdot_med_col]
                 if pd.notna(mdot_val) and np.isfinite(mdot_val) and mdot_val > 0:
                     mdot_suffix = "*"  # Indicate we're using MaccMed
-            
+
             if mdot_val is not None:
                 try:
                     if np.isfinite(mdot_val) and mdot_val > 0:
@@ -1128,7 +1128,7 @@ class plotcloud:
                         mdot_str = f"Mdot={mdot_val:.2g} M☉/yr{mdot_suffix}"
                 except (TypeError, ValueError):
                     pass
-            
+
             # Add accretion luminosity in linear units (Lsun), two significant figures.
             if loglacc_col is not None:
                 loglacc_val = row[loglacc_col]
@@ -1139,7 +1139,7 @@ class plotcloud:
                             lacc_str = f"Lacc={lacc_val:.2g} L☉"
                 except (TypeError, ValueError):
                     pass
-            
+
             if distance_col is not None:
                 dist_val = row[distance_col]
                 try:
@@ -1162,9 +1162,9 @@ class plotcloud:
             line2_parts = [p for p in (mdot_str, lacc_str) if p]
             if line2_parts:
                 label_parts.append("\n" + " ".join(line2_parts))
-            
+
             display_label = " ".join(label_parts)
-            
+
             # Create SkyCoord from decimal degrees
             co1 = SkyCoord(
                 ra=ra_deg * units.deg,
@@ -1238,20 +1238,23 @@ class plotcloud:
              colorbar=True, colorbar_label=None, colorbar_kwargs=None,
              stretch=None, colorbar_stretch_labels=None, colorbar_av_ticks=None,
              herschel_fits=None, herschel_band='psw', herschel_cache_dir=None,
-             herschel_hips_id=None):
+             herschel_hips_id=None, akari_band='n160', akari_hips_id=None,
+             iras_band='100', grid=True):
         """
         Create the extinction map plot.
 
         Parameters
         ----------
         dustmap : str, default 'planck'
-            Dust map to use: 'planck', 'sfd', 'bayestar', 'herschel', or
-            'herschel_hips'.
+            Dust map to use: 'planck', 'sfd', 'bayestar', 'herschel',
+            'herschel_hips', 'akari_hips', or 'iras'.
             ``herschel`` uses pointed SPIRE maps (ESASky download/cache or
             ``herschel_fits``).
             ``herschel_hips`` uses ESA SPIRE HiPS cutouts via hips2fits
             (visualisation mosaic; lower fidelity than pointed maps).
-            Herschel values are surface brightness in MJy/sr.
+            ``akari_hips`` uses AKARI FIS all-sky HiPS (``n160`` ~160 um).
+            ``iras`` uses IRAS/IRIS all-sky photometry via SkyView
+            (default 100 um). Herschel/AKARI/IRAS values are MJy/sr.
         figsize : tuple, default (18, 10)
             Figure size in inches.
         dpi : int, default 300
@@ -1322,6 +1325,15 @@ class plotcloud:
         herschel_hips_id : str, optional
             Override HiPS survey id for ``dustmap='herschel_hips'``
             (default ``ESAVO/P/HERSCHEL/SPIRE-250`` etc. from band).
+        akari_band : str, default 'n160'
+            AKARI FIS band for ``dustmap='akari_hips'``: 'n160' or 'widel'.
+        akari_hips_id : str, optional
+            Override HiPS survey id for ``dustmap='akari_hips'``.
+        iras_band : str, default '100'
+            IRAS/IRIS band in microns for ``dustmap='iras'``:
+            '12', '25', '60', or '100'.
+        grid : bool, default True
+            If True, draw RA/Dec dashed grid lines on ICRS plots.
 
         Returns
         -------
@@ -1330,9 +1342,12 @@ class plotcloud:
         ax : matplotlib.axes.Axes
             The axes object.
         """
-        is_herschel = dustmap in ('herschel', 'herschel_hips')
+        # Intensity maps (MJy/sr) vs extinction maps (A_V)
+        is_herschel = dustmap in (
+            'herschel', 'herschel_hips', 'akari_hips', 'iras',
+        )
 
-        # Auto stretch: log for Herschel intensity, linear for Av maps
+        # Auto stretch: log for FIR intensity, linear for Av maps
         if stretch is None:
             stretch = 'log' if is_herschel else 'linear'
         stretch = str(stretch).lower()
@@ -1411,6 +1426,26 @@ class plotcloud:
                 str(herschel_band).lower(), str(herschel_band)
             )
             dustmap_name = f'Herschel SPIRE {band_um} HiPS'
+        elif dustmap == 'akari_hips':
+            from .herschel import akari_hips_on_grid
+
+            av, herschel_bunit = akari_hips_on_grid(
+                self.coords,
+                band=akari_band,
+                hips_id=akari_hips_id,
+            )
+            band_um = {'n160': '160', 'widel': 'Wide-L'}.get(
+                str(akari_band).lower(), str(akari_band)
+            )
+            dustmap_name = f'AKARI FIS {band_um}'
+        elif dustmap == 'iras':
+            from .herschel import iras_on_grid
+
+            av, herschel_bunit = iras_on_grid(
+                self.coords,
+                band=iras_band,
+            )
+            dustmap_name = f'IRAS/IRIS {iras_band}'
         else:
             raise ValueError(f"Unknown dustmap: {dustmap}")
 
@@ -1463,6 +1498,7 @@ class plotcloud:
         imshow_kw = dict(
             origin='lower',
             interpolation='bilinear',
+            interpolation_stage='data',
             cmap=cmap,
             aspect='equal',
         )
@@ -1517,9 +1553,11 @@ class plotcloud:
                 )
             )
             ax.xaxis.set_major_formatter(formatter)
-            # Grid linewidth will be scaled in _apply_scaling if interactive
-            plt.grid(axis='x', color='0.3', linestyle='dashed', alpha=0.3, linewidth=0.3)
-            plt.grid(axis='y', color='0.3', linestyle='dashed', alpha=0.3, linewidth=0.3)
+            if grid:
+                plt.grid(axis='x', color='0.3', linestyle='dashed', alpha=0.3, linewidth=0.3)
+                plt.grid(axis='y', color='0.3', linestyle='dashed', alpha=0.3, linewidth=0.3)
+            else:
+                ax.grid(False)
         else:  # galactic
             im = ax.imshow(
                 map_values[::, ::-1],
