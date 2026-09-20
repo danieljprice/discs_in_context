@@ -1399,21 +1399,35 @@ class plotcloud:
             av = 2.742 * ebv
             dustmap_name = 'Bayestar'
         elif dustmap == 'herschel':
-            from .herschel import herschel_on_grid
+            band_key = str(herschel_band).lower().replace('um', '').strip()
+            if band_key in ('70', '100', '160'):
+                from .herschel import pacs_on_grid
 
-            # Prefer object name for ESASky query when available
-            position = self.object
-            av, herschel_bunit = herschel_on_grid(
-                self.coords,
-                fits_path=herschel_fits,
-                position=position,
-                band=herschel_band,
-                cache_dir=herschel_cache_dir,
-            )
-            band_um = {'psw': '250', 'pmw': '350', 'plw': '500'}.get(
-                str(herschel_band).lower(), str(herschel_band)
-            )
-            dustmap_name = f'Herschel SPIRE {band_um}'
+                position = self.object
+                av, herschel_bunit = pacs_on_grid(
+                    self.coords,
+                    fits_path=herschel_fits,
+                    position=position,
+                    band=band_key,
+                    cache_dir=herschel_cache_dir,
+                )
+                dustmap_name = f'Herschel PACS {band_key}'
+            else:
+                from .herschel import herschel_on_grid
+
+                # Prefer object name for ESASky query when available
+                position = self.object
+                av, herschel_bunit = herschel_on_grid(
+                    self.coords,
+                    fits_path=herschel_fits,
+                    position=position,
+                    band=herschel_band,
+                    cache_dir=herschel_cache_dir,
+                )
+                band_um = {'psw': '250', 'pmw': '350', 'plw': '500'}.get(
+                    band_key, str(herschel_band)
+                )
+                dustmap_name = f'Herschel SPIRE {band_um}'
         elif dustmap == 'herschel_hips':
             from .herschel import herschel_hips_on_grid
 
@@ -1477,7 +1491,14 @@ class plotcloud:
         tick_width = 0.4 * size_scale
         tick_length = 2.0 * size_scale
 
-        ax.tick_params(labelsize=fontsize, width=tick_width, length=tick_length, pad=2.0)
+        ax.tick_params(
+            which='both',
+            direction='in',
+            labelsize=fontsize,
+            width=tick_width,
+            length=tick_length,
+            pad=2.0,
+        )
         ax.xaxis.label.set_fontsize(fontsize)
         ax.yaxis.label.set_fontsize(fontsize)
         # Match axis box (spines) thickness to tick thickness for visual balance
@@ -1606,8 +1627,45 @@ class plotcloud:
                     tick_locs = ticks_av
                 cbar.set_ticks(tick_locs)
                 cbar.set_ticklabels([f"{t:g}" for t in ticks_av])
+            elif stretch == 'log':
+                # Decades within [vmin, vmax] with plain labels (10, 100, ...)
+                # instead of oversized mathtext 10^n
+                vmin_pos = max(float(vmin), 1e-6) if float(vmin) > 0 else 1e-6
+                vmax_pos = max(float(vmax), vmin_pos * 10.0)
+                exp_lo = int(np.ceil(np.log10(vmin_pos) - 1e-12))
+                exp_hi = int(np.floor(np.log10(vmax_pos) + 1e-12))
+                if exp_hi < exp_lo:
+                    tick_vals = np.array([vmin_pos, vmax_pos])
+                else:
+                    tick_vals = 10.0 ** np.arange(exp_lo, exp_hi + 1)
 
-            cbar.ax.tick_params(labelsize=fontsize, width=tick_width, length=tick_length, pad=1.0)
+                def _log_cbar_label(x):
+                    if not np.isfinite(x) or x <= 0:
+                        return ''
+                    log10x = np.log10(x)
+                    if abs(log10x - round(log10x)) < 1e-8:
+                        exp = int(round(log10x))
+                        if 0 <= exp <= 4:
+                            return f'{10 ** exp:g}'
+                        return f'1e{exp}'
+                    return f'{x:g}'
+
+                cbar.set_ticks(tick_vals)
+                cbar.set_ticklabels([_log_cbar_label(t) for t in tick_vals])
+                cbar.ax.yaxis.set_minor_locator(
+                    matplotlib.ticker.LogLocator(base=10.0, subs=np.arange(2, 10))
+                )
+
+            # Match main-axis tick style; ticks point into the colour bar
+            cbar.ax.tick_params(
+                which='both',
+                direction='in',
+                labelsize=fontsize,
+                width=tick_width,
+                length=tick_length,
+                pad=1.0,
+            )
+            cbar.ax.yaxis.get_offset_text().set_fontsize(fontsize)
             for spine in cbar.ax.spines.values():
                 spine.set_linewidth(tick_width)
 

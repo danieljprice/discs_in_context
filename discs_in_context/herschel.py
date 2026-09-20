@@ -55,6 +55,38 @@ def default_hips_cache_dir():
     return Path.home() / '.cache' / 'discs_in_context' / 'hips_cutouts'
 
 
+# CDS hips2fits: primary plus documented mirror (alasky often times out)
+HIPS2FITS_SERVERS = (
+    'https://alasky.cds.unistra.fr/hips-image-services/hips2fits',
+    'https://alaskybis.cds.unistra.fr/hips-image-services/hips2fits',
+)
+
+
+def _query_hips2fits(hips_id, wcs, timeout=60):
+    """
+    Request a FITS cutout, trying each hips2fits host until one answers.
+
+    ``alasky.cds.unistra.fr`` frequently hits the 30 s connect timeout;
+    the CDS mirror is tried next.
+    """
+    from astroquery.hips2fits import hips2fitsClass
+
+    last_error = None
+    # Fail over quickly if the primary host does not connect
+    timeouts = (20, timeout)
+    for server, host_timeout in zip(HIPS2FITS_SERVERS, timeouts):
+        client = hips2fitsClass()
+        client.server = server
+        client.timeout = host_timeout
+        print(f"  hips2fits {server} ...")
+        try:
+            return client.query_with_wcs(hips=hips_id, wcs=wcs, format='fits')
+        except Exception as exc:
+            last_error = exc
+            print(f"  failed ({type(exc).__name__}); trying next host")
+    raise last_error
+
+
 def open_spire_image(fits_path):
     """
     Return image data, WCS, and BUNIT for a SPIRE map product.
@@ -210,20 +242,190 @@ def ensure_spire_download(position, download_dir=None, band='psw',
     return picked
 
 
+# PACS photometric bands. Red camera is always 160 um; blue is 70 or 100.
+PACS_BANDS = ('70', '100', '160')
+
+
+def open_herschel_image(fits_path):
+    """
+    Return the first 2D image, WCS, and BUNIT from a SPIRE or PACS product.
+    """
+    fits_path = Path(fits_path)
+    with fits.open(fits_path) as hdul:
+        for hdu in hdul:
+            data = hdu.data
+            if data is None or getattr(data, 'ndim', 0) < 2:
+                continue
+            # Drop degenerate leading axes (some PACS products are 1 x ny x nx)
+            arr = np.squeeze(np.array(data, dtype=float))
+            if arr.ndim != 2:
+                continue
+            wcs = WCS(hdu.header).celestial
+            bunit = hdu.header.get('BUNIT', 'Jy/pixel')
+            return arr, wcs, bunit
+    raise ValueError(f"No 2D image extension in {fits_path}")
+
+
+def ensure_pacs_download(position, download_dir=None, band='160',
+                         radius=10 * u.arcmin):
+    """
+    Query ESASky for PACS photometry near ``position`` and cache it.
+
+    Parameters
+    ----------
+    position : str or SkyCoord
+        Object name or sky position.
+    download_dir : path-like, optional
+        Cache directory. Defaults to ``~/.cache/discs_in_context/herschel``.
+    band : str, default '160'
+        PACS band in microns: '70', '100', or '160'.
+    radius : Quantity, default 10 arcmin
+        Cone-search radius. PACS pointings are a few arcminutes across.
+
+    Returns
+    -------
+    Path
+        Cached PACS FITS that covers ``position``.
+    """
+    band = str(band).lower().replace('um', '').strip()
+    if band not in PACS_BANDS:
+        raise ValueError(
+            f"PACS band must be one of {PACS_BANDS}, got '{band}'"
+        )
+
+    download_dir = Path(download_dir) if download_dir is not None else default_cache_dir()
+    download_dir.mkdir(parents=True, exist_ok=True)
+    position_coord = _as_skycoord(position)
+
+    # Red detector is 160 um (filename token 'mapr'); blue is 70 or 100 ('mapb')
+    token = 'mapr' if band == '160' else 'mapb'
+    existing = [
+        path for path in download_dir.glob('**/*.fits*')
+        if token in path.name.lower()
+    ]
+    picked = _pick_covering_spire_generic(existing, position_coord)
+    if picked is not None:
+        print(f"Using cached PACS {band} um map covering target: {picked.name}")
+        return picked
+
+    from astroquery.esasky import ESASky
+    from astroquery.utils import TableList
+
+    query_radius = min(radius, 30 * u.arcmin)
+    print(
+        f"Querying ESASky for Herschel PACS {band} um near "
+        f"{position_coord.icrs.to_string('hmsdms')} (r={query_radius})..."
+    )
+    maps = ESASky.query_region_maps(
+        position=position_coord,
+        radius=query_radius,
+        missions=['HERSCHEL'],
+    )
+    if 'HERSCHEL' not in maps.keys():
+        raise ValueError(f"No Herschel maps found near {position}")
+
+    table = maps['HERSCHEL']
+    pacs = table[table['instrument'] == 'PACS']
+    keep = []
+    for i, filt in enumerate(np.asarray(pacs['filter'], dtype=str)):
+        if band in filt.replace(' ', '').split(','):
+            keep.append(i)
+    if not keep:
+        raise ValueError(f"No Herschel PACS {band} um maps found near {position}")
+    pacs = pacs[keep]
+
+    ra = np.asarray(pacs['ra_deg'], dtype=float)
+    dec = np.asarray(pacs['dec_deg'], dtype=float)
+    centres = SkyCoord(ra * u.deg, dec * u.deg, frame='icrs')
+    pacs = pacs[np.argsort(position_coord.separation(centres))]
+
+    print(f"Downloading {len(pacs)} PACS observation(s) to {download_dir}...")
+    ESASky.get_maps(
+        TableList({'HERSCHEL': pacs}),
+        missions=['HERSCHEL'],
+        download_dir=str(download_dir),
+    )
+
+    existing = [
+        path for path in download_dir.glob('**/*.fits*')
+        if token in path.name.lower()
+    ]
+    picked = _pick_covering_spire_generic(existing, position_coord)
+    if picked is None:
+        raise ValueError(
+            f"Downloaded PACS data near {position}, but no {band} um image covers the target"
+        )
+    print(f"Selected PACS {band} um map: {picked.name}")
+    return picked
+
+
+def _pick_covering_spire_generic(paths, position):
+    """Prefer a cached FITS image that covers ``position``."""
+    covering = []
+    for path in paths:
+        try:
+            if _herschel_covers_position(path, position):
+                covering.append(path)
+        except Exception:
+            continue
+    if not covering:
+        return None
+    return max(covering, key=lambda p: p.stat().st_size)
+
+
+def _herschel_covers_position(fits_path, position, margin_pix=1.0):
+    """Return True if ``position`` falls inside a Herschel image."""
+    data, wcs, _bunit = open_herschel_image(fits_path)
+    pos = _as_skycoord(position)
+    x, y = wcs.world_to_pixel(pos)
+    x = float(np.asarray(x).reshape(-1)[0])
+    y = float(np.asarray(y).reshape(-1)[0])
+    if not (np.isfinite(x) and np.isfinite(y)):
+        return False
+    ny, nx = data.shape
+    return (
+        margin_pix <= x < (nx - 1 - margin_pix)
+        and margin_pix <= y < (ny - 1 - margin_pix)
+    )
+
+
+def pacs_on_grid(coords, fits_path=None, position=None, band='160',
+                 cache_dir=None):
+    """
+    Return PACS surface brightness on the same grid as ``coords``.
+    """
+    if position is None:
+        mid = coords[coords.shape[0] // 2, coords.shape[1] // 2]
+        position = mid.icrs if hasattr(mid, 'icrs') else mid
+    if fits_path is None:
+        fits_path = ensure_pacs_download(
+            position,
+            download_dir=cache_dir,
+            band=band,
+            radius=_fov_radius(coords),
+        )
+    data, src_wcs, bunit = open_herschel_image(fits_path)
+    map_2d = _reproject_to_coords(data, src_wcs, coords)
+    return map_2d, bunit
+
+
 def _wcs_from_skycoord_grid(coords):
     """
-    Build a simple TAN WCS matching a regular SkyCoord meshgrid.
+    Build a TAN WCS covering the ``coords`` FOV (for HiPS fetch requests).
 
-    Pixel (1, 1) is the centre of ``coords[0, 0]``; axis 1 follows RA/l,
-    axis 2 follows Dec/b.
+    The reference pixel is at the array centre. This WCS is only used to ask
+    hips2fits for a cutout; the returned image is then sampled at the true
+    sky positions of ``coords`` (see ``_reproject_to_coords``), because a
+    linspace RA/Dec mesh is not identical to a TAN (or CAR) pixel grid.
     """
     ny, nx = coords.shape
+    mid = coords[ny // 2, nx // 2]
     header = fits.Header()
     header['NAXIS'] = 2
     header['NAXIS1'] = nx
     header['NAXIS2'] = ny
-    header['CRPIX1'] = 1.0
-    header['CRPIX2'] = 1.0
+    header['CRPIX1'] = nx / 2.0 + 0.5
+    header['CRPIX2'] = ny / 2.0 + 0.5
     header['CUNIT1'] = 'deg'
     header['CUNIT2'] = 'deg'
 
@@ -232,20 +434,23 @@ def _wcs_from_skycoord_grid(coords):
         lat = coords.dec.degree
         header['CTYPE1'] = 'RA---TAN'
         header['CTYPE2'] = 'DEC--TAN'
+        header['CRVAL1'] = float(mid.ra.degree)
+        header['CRVAL2'] = float(mid.dec.degree)
     else:
         lon = coords.l.degree
         lat = coords.b.degree
         header['CTYPE1'] = 'GLON-TAN'
         header['CTYPE2'] = 'GLAT-TAN'
+        header['CRVAL1'] = float(mid.l.degree)
+        header['CRVAL2'] = float(mid.b.degree)
 
-    header['CRVAL1'] = float(lon[0, 0])
-    header['CRVAL2'] = float(lat[0, 0])
+    # Pixel scale from the mesh span (absolute value; RA may increase or decrease)
     if nx > 1:
-        header['CDELT1'] = float(lon[0, -1] - lon[0, 0]) / (nx - 1)
+        header['CDELT1'] = -abs(float(lon[0, -1] - lon[0, 0]) / (nx - 1))
     else:
-        header['CDELT1'] = 1.0 / 3600.0
+        header['CDELT1'] = -1.0 / 3600.0
     if ny > 1:
-        header['CDELT2'] = float(lat[-1, 0] - lat[0, 0]) / (ny - 1)
+        header['CDELT2'] = abs(float(lat[-1, 0] - lat[0, 0]) / (ny - 1))
     else:
         header['CDELT2'] = 1.0 / 3600.0
 
@@ -339,7 +544,6 @@ def _hips_on_grid(coords, hips_id, min_coverage=1e-4, label='HiPS',
     field does not re-hit the network.
     """
     import hashlib
-    from astroquery.hips2fits import hips2fits
 
     target_wcs = _wcs_from_skycoord_grid(coords)
     hdr = target_wcs.to_header()
@@ -364,11 +568,7 @@ def _hips_on_grid(coords, hips_id, min_coverage=1e-4, label='HiPS',
             bunit = hdul[0].header.get('BUNIT', 'MJy/sr')
     else:
         print(f"Fetching {label} cutout ({hips_id})...")
-        hdul = hips2fits.query_with_wcs(
-            hips=hips_id,
-            wcs=target_wcs,
-            format='fits',
-        )
+        hdul = _query_hips2fits(hips_id, target_wcs)
         data = np.array(hdul[0].data, dtype=float)
         src_wcs = WCS(hdul[0].header)
         bunit = hdul[0].header.get('BUNIT', 'MJy/sr')
@@ -382,10 +582,9 @@ def _hips_on_grid(coords, hips_id, min_coverage=1e-4, label='HiPS',
             )
             print(f"Cached {label} cutout -> {cache_path}")
 
-    if data.shape != coords.shape:
-        map_2d = _reproject_to_coords(data, src_wcs, coords)
-    else:
-        map_2d = data
+    # Always sample at the meshgrid sky positions. Shape equality alone does
+    # not mean the HiPS pixels line up with linspace RA/Dec (TAN ≠ mesh).
+    map_2d = _reproject_to_coords(data, src_wcs, coords)
 
     finite_frac = float(np.isfinite(map_2d).mean()) if map_2d.size else 0.0
     if finite_frac < min_coverage:
